@@ -3,11 +3,14 @@
 #include <Arduino.h>
 #include "variables.hpp"
 #include "Gate.hpp"
+#include "Log.hpp"
 #include "pins.hpp"
 #include "switches.hpp"
 
 void openingEdgeISR();
 void closingEdgeISR();
+void handleOpeningEdge();
+void handleClosingEdge();
 float checkBatteryVoltage();
 void setupPins();
 void setupInterrupts();
@@ -16,8 +19,13 @@ void setupLightSensor();
 void readGatePosition();
 void setupEEPROM();
 void readLight();
+void processLightSampling(); // non-blocking replacement for readLight
+bool isLightSamplingFinished();
+void startLightSampling();
 void printInfo();
 void compensateRtcDrift();
+void processRtcDrift(); // non-blocking drift compensation step
+bool isRtcDriftInProgress();
 // void switchSummerWinterTime();
 void controlLeds();
 #ifdef PRINT
@@ -28,12 +36,15 @@ void printLightIntensivity();
 void printRtcSqwMode();
 #endif
 #ifdef LOG_MOVES
-void logInfo(char move);
+void logInfo(GateMove move);
 void writeLogIntoEeprom();
 #endif
 #ifdef LOG_LIGHT
 void logLightInfo();
 void writeLightLogIntoEeprom();
+void startLightLogging();
+void processLightLogging();
+bool isLightLoggingFinished();
 #endif
 #ifdef PRINT_LOG_LIGHT
 void printLightLogFromEeprom();
@@ -47,11 +58,13 @@ inline float mapfloat(long x, long in_min, long in_max, long out_min, long out_m
 }
 
 inline float checkBatteryVoltage() {
+    int raw = analogRead(batteryVoltagePin); // single read (could be averaged if needed)
+    float v = mapfloat(raw, 0, 1023, 0, 5);
     #ifdef DEBUG
     Serial.print(F("Battery voltage: "));
-    Serial.println(mapfloat(analogRead(batteryVoltagePin), 0, 1023, 0, 5));
+    Serial.println(v);
     #endif
-    return mapfloat(analogRead(batteryVoltagePin), 0, 1023, 0, 5);
+    return v;
 }
 
 #endif

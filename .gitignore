@@ -8,3 +8,7 @@
 lib/
 .travis.yml
 README
+# CocoIndex Code (ccc)
+/.cocoindex_code/
+config.local.json
+__pycache__/

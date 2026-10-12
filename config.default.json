@@ -1,25 +1,6 @@
 {
-  "_license": "CC BY-NC-SA 4.0. Strictly non-commercial.",
-  "window": {
-    "mode": "sun_position",
-    "legacy": { "hour_open": 6, "hour_close": 18 },
-    "sun": { "sunrise_offset_min": -30, "sunset_offset_min": 30 }
-  },
-  "override_open": {
-    "mode": "dynamic",
-    "fixed_hour": 8,
-    "after_sunrise_min": 120
-  },
-  "override_close": {
-    "mode": "fixed",
-    "fixed_hour": 22,
-    "after_sunset_min": 120
-  },
-  "light": {
-    "lux_open": 8.0,
-    "lux_close": 3.0
-  },
-  "safety": {
-    "move_timeout_s": 21
-  }
+  "location": {"lat": 50.01, "lon": 20.99},
+  "schedule": {"open_after_sunrise_min": 30, "close_after_dusk_min": 0, "open_not_before_min": null, "close_not_after_min": null},
+  "safety": {"move_timeout_s": 21},
+  "wifi": {"ap_password": "", "webrepl_password": ""}
 }

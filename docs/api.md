@@ -2,323 +2,336 @@
 
 ## Overview
 
-The web server runs on **microdot** (async, MicroPython-compatible).  
-It is only active during a WiFi AP session — triggered by double-clicking either physical button.
+Web server: microdot (async, MicroPython-compatible). Active only during a WiFi AP
+session. The AP starts when both physical buttons are held for 3 s (Phase 4, R7),
+or automatically once per boot when the RTC is unsynced or OSF=1 (R8).
+Auto-off after 10 min without HTTP activity.
 
 | Environment | Base URL |
 |-------------|----------|
-| On-device (ESP32) | `http://192.168.4.1` |
-| Local dev (CPython) | `http://localhost:5000` |
+| On device (ESP32-C3) | `http://192.168.4.1` |
+| Local dev (CPython) | `http://localhost:5000` (`run_local.py`) |
 
-**Authentication:** None. The AP network (`Coop_Control`) has WPA2 password `coop123`.  
-Physical proximity is the access control — no token or session management.
+**Access:** AP `Szczesliwy_Kurczak`. WPA2 when `wifi.ap_password` is non-empty (8..63 chars).
+Empty password = open AP (R6). The password is write-only: `GET /api/config`
+returns only `wifi.ap_password_set` (bool). No token, no session. Physical
+proximity is the access control.
 
-**Content-Type:** All API endpoints produce and consume `application/json` unless noted.
+**WebREPL:** `wifi.webrepl_password` (`""` = off, else 4..9 printable ASCII). Runs only while the AP session is up (`webrepl.start(password=...)` after `ap_on`, `webrepl.stop()` before `ap_off`). Write-only like the AP password: `GET /api/config` returns only `wifi.webrepl_password_set` (bool).
+
+**Content type:** requests with a body send `application/json`. Responses are
+`application/json`, except `GET /` (`text/html`).
+
+**Time values:** minutes from local midnight (CET or CEST). The RTC stores CET
+always; DST is applied in logic only.
+
+**Errors:** every 4xx / 5xx body is `{"error": "<text>"}`.
 
 ---
 
-## Endpoints Summary
+## Endpoints summary
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/status` | Current gate state, sensor readings, schedule |
-| `GET` | `/api/events` | Server-Sent Events stream (live status) |
-| `GET` | `/api/config` | Read current configuration |
-| `POST` | `/api/config` | Write and validate new configuration |
-| `POST` | `/api/time` | Synchronise RTC from browser timestamp |
-| `POST` | `/api/manual` | Manually open or close the gate |
-| `GET` | `/api/forecast` | 30-day (or N-day) trigger schedule |
-| `GET` | `/api/logs` | Event log from persistent binary store |
-| `POST` | `/api/reboot` | Soft-reset the device |
+| GET | `/` | Single-page UI (`index.html`) |
+| GET | `/api/status` | State, time, limits, today's schedule, last 5 events |
+| GET | `/api/config` | Read configuration (AP and WebREPL passwords never returned) |
+| POST | `/api/config` | Validate, save and apply configuration |
+| POST | `/api/time` | Set RTC from browser UTC timestamp |
+| POST | `/api/manual?action=open\|close` | Manual move (refused in SAFETY_STOP / ERROR) |
+| GET | `/api/forecast` | Schedule for the next 14 days (fixed, no query params) |
+| GET | `/api/log` | Newest 50 events, newest first (RAM + file tail, Phase 6). No query params |
+| POST | `/api/reboot` | Soft reset (allowed in any state) |
+| GET | `/api/diag` | Diagnostics: I2C devices, raw pins, RTC OSF, clock, memory, uptime, AP clients. 404 when not wired |
 
 ---
 
 ## GET `/api/status`
 
-Returns a snapshot of the current system state.
-
-**Response — 200 OK**
+**200 OK** (example values)
 
 ```json
 {
   "state": "IDLE_CLOSED",
-  "lux": [4.2, 3.8, 3.5, 4.0, 3.9],
   "time": "07:45",
   "limit_top": false,
   "limit_bottom": true,
-  "vbat_v": 3.02,
   "config_warning": "",
-  "today_schedule": {
-    "wo": 330,
-    "wc": 1110,
-    "ao": 450,
-    "ac": 1320
-  }
+  "today_schedule": { "open": 412, "close": 1094 },
+  "rtc_synced": true,
+  "events": []
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `state` | string | Current `GateState` enum value |
-| `lux` | float[5] | Last 5 BH1750 readings (lux) |
-| `time` | string | RTC local time `HH:MM` (CET or CEST) |
+| `state` | string | `INIT`, `IDLE_OPEN`, `IDLE_CLOSED`, `MOVING_OPEN`, `MOVING_CLOSE`, `MANUAL_HOLD_OPEN`, `MANUAL_HOLD_CLOSED`, `SAFETY_STOP`, `ERROR` |
+| `time` | string \| null | RTC local time `HH:MM`. `null` if RTC read failed |
 | `limit_top` | bool | `true` = door fully open (LIMIT_TOP active) |
 | `limit_bottom` | bool | `true` = door fully closed (LIMIT_BOTTOM active) |
-| `vbat_v` | float \| null | DS3231 backup battery voltage (V). `null` before first read |
-| `config_warning` | string | Non-empty if runtime config invariant was clamped |
-| `today_schedule.wo` | int | Window open (minutes from midnight, local) |
-| `today_schedule.wc` | int | Window close (minutes from midnight, local) |
-| `today_schedule.ao` | int | Backstop open (minutes from midnight, local) |
-| `today_schedule.ac` | int | Backstop close (minutes from midnight, local) |
+| `config_warning` | string | Non-empty if today's open ≥ close (no auto moves today) |
+| `today_schedule` | object \| null | `{open, close}` minutes. `null` when RTC unsynced |
+| `rtc_synced` | bool | `false` while year < 2020 or OSF flag set |
+| `events` | array | Last 5 events, newest first (`logs.log_json(5)`, Phase 6 format), read from file tail only (R24). `[]` until Phase 6 |
 
----
-
-## GET `/api/events`
-
-Server-Sent Events stream. The client receives a `status` JSON payload every 2 seconds without polling.
-
-**Response — 200 OK**  
-Content-Type: `text/event-stream`
-
-```
-data: {"state":"IDLE_CLOSED","lux":[4.2,3.8,3.5,4.0,3.9],"time":"07:45",...}
-
-data: {"state":"IDLE_CLOSED","lux":[4.1,3.9,3.6,4.1,4.0],"time":"07:45",...}
-```
-
-The stream runs indefinitely. Each event is identical in structure to `GET /api/status`.
-
-> **Note:** The ESP32 AP supports a maximum of **2 simultaneous SSE clients**. Additional clients should fall back to polling `/api/status`.
+`today_schedule.open` = sunrise (−0.833°) + `schedule.open_after_sunrise_min`.
+`today_schedule.close` = civil dusk (−6°) + `schedule.close_after_dusk_min`.
 
 ---
 
 ## GET `/api/config`
 
-Returns the current configuration as a JSON object.
-
-**Response — 200 OK**
+**200 OK**
 
 ```json
 {
-  "window": {
-    "mode": "sun_position",
-    "legacy": { "hour_open": 6, "hour_close": 18 },
-    "sun": { "sunrise_offset_min": -30, "sunset_offset_min": 30 }
-  },
-  "override_open": {
-    "mode": "dynamic",
-    "fixed_hour": 8,
-    "after_sunrise_min": 120
-  },
-  "override_close": {
-    "mode": "fixed",
-    "fixed_hour": 22,
-    "after_sunset_min": 120
-  },
-  "light": {
-    "lux_open": 8.0,
-    "lux_close": 3.0
-  },
-  "safety": {
-    "move_timeout_s": 21
-  }
+  "location": { "lat": 50.01, "lon": 20.99 },
+  "schedule": { "open_after_sunrise_min": 30, "close_after_dusk_min": 0, "open_not_before_min": null, "close_not_after_min": null },
+  "safety": { "move_timeout_s": 21 },
+  "wifi": { "ap_password_set": false, "webrepl_password_set": false }
 }
 ```
 
-Unused fields (e.g. `fixed_hour` when `mode=dynamic`) are preserved in the response.
+Always the full document (defaults merged in).
+
+| Key | Range | Meaning |
+|-----|-------|---------|
+| `location.lat` | −90 .. 90 (number) | Latitude, degrees |
+| `location.lon` | −180 .. 180 (number) | Longitude, degrees |
+| `schedule.open_after_sunrise_min` | −120 .. 180 (integer) | Offset after sunrise |
+| `schedule.close_after_dusk_min` | −120 .. 180 (integer) | Offset after civil dusk |
+| `schedule.open_not_before_min` | `null` or 0 .. 1439 (integer) | Local-time floor for open (minutes since midnight). `null` = off. Applied after offsets and DST |
+| `schedule.close_not_after_min` | `null` or 0 .. 1439 (integer) | Local-time ceiling for close (minutes since midnight). `null` = off. Applied after offsets and DST |
+| `safety.move_timeout_s` | 5 .. 120 (integer) | Motor timeout → SAFETY_STOP |
+| `wifi.ap_password_set` | bool (GET only) | `true` when a non-empty AP password is stored. The password itself is never returned |
+| `wifi.webrepl_password_set` | bool (GET only) | `true` when a non-empty WebREPL password is stored. The password itself is never returned |
 
 ---
 
 ## POST `/api/config`
 
-Validates and saves a new configuration. The invariant is checked against today's computed sunrise/sunset before saving.
+Body: the document as in GET, with two differences:
+- `wifi.ap_password` is **optional**. Absent = keep the stored password.
+  Present = set it: `""` = open AP, otherwise str 8..63 chars.
+- `wifi.webrepl_password` is **optional** too. Absent = keep the stored password.
+  Present = set it (`""` = WebREPL off, else 4..9 printable ASCII).
+- `wifi.ap_password_set` and `wifi.webrepl_password_set` are GET-only and are **not accepted** (400).
 
-**Request body:** same structure as `GET /api/config` response.
+UI (Phase 7, R39): checkbox "clear password (open AP)" sends `""`. Blank field = keep.
 
-**Response — 200 OK**
+**200 OK**
 
 ```json
 { "ok": true }
 ```
 
-**Response — 400 Bad Request** (invariant violation)
+**400 Bad Request** — examples (exact `error` text):
 
-```json
-{ "error": "abs_open (06:00) < window_open (08:00)" }
-```
+| Cause | `error` |
+|-------|---------|
+| Body not JSON | `invalid JSON` |
+| Unknown key | `config: unknown key foo` |
+| Missing key | `schedule: missing key close_after_dusk_min` |
+| Out of range | `schedule.open_after_sunrise_min: 200 outside -120..180` |
+| Wrong type (incl. bool) | `safety.move_timeout_s: wrong type` |
+| AP password length | `wifi.ap_password: must be "" or 8..63 chars` |
+| GET-only key sent | `wifi: unknown key ap_password_set` |
+| GET-only key sent | `wifi: unknown key webrepl_password_set` |
 
-Possible error messages:
+**500 Internal Server Error** — `{"error": "save failed"}`. Config in RAM unchanged.
 
-| Condition | Message pattern |
-|-----------|----------------|
-| abs_open before window_open | `abs_open (HH:MM) < window_open (HH:MM)` |
-| abs_close before window_close | `abs_close (HH:MM) < window_close (HH:MM)` |
-| abs_open ≥ abs_close | `abs_open (HH:MM) >= abs_close (HH:MM)` |
-
-On success, the new config is:
-1. Written to `/config.json` (persists across reboots)
-2. Applied to the running controller immediately
-3. Trigger times recalculated for today
+On success, in this order: written to `/config.json` (atomic tmp + rename), applied
+to the running controller, today's schedule recalculated on the next tick.
 
 ---
 
 ## POST `/api/time`
 
-Synchronises the DS3231 RTC from a browser-provided UTC timestamp.
+Set the DS3231 from a browser UTC timestamp.
 
-**Request body**
+**Request**
 
 ```json
 { "timestamp_ms": 1717228800000 }
 ```
 
-`timestamp_ms` is the value of `Date.now()` in JavaScript — UTC milliseconds since Unix epoch.
+`timestamp_ms` = JavaScript `Date.now()`. Must be an integer (not bool, not float).
+Converted to CET (UTC + 1 h) first; the year range is checked on the CET date:
+2024..2099 (inclusive).
 
-**Conversion:** UTC + 1 hour = CET. DST is never stored in the RTC.
-
-**Response — 200 OK**
+**200 OK**
 
 ```json
 { "ok": true }
 ```
 
-**Example:** `timestamp_ms = 1717228800000` (2024-06-01 08:00:00 UTC)  
-→ DS3231 stores **2024-06-01 09:00:00 CET**
+**400 Bad Request**
 
-> Automatic open/close logic is disabled until the RTC is synchronised (year < 2020 is treated as unsynced). Manual buttons always work.
+| Cause | `error` |
+|-------|---------|
+| Missing / not int | `timestamp_ms: int required` |
+| CET year outside 2024..2099 | `timestamp_ms: year outside 2024..2099` |
+
+**500 Internal Server Error**
+
+| Cause | `error` |
+|-------|---------|
+| RTC write failed (I2C `OSError` on `set_datetime`) | `rtc write failed` |
+
+On 500 the schedule cache is not reset (`config_warning` / today's schedule unchanged).
+
+**Conversion:** UTC + 1 h = CET. Example: `1717228800000` (2024-06-01 08:00 UTC)
+→ RTC `2024-06-01 09:00` CET.
+
+Side effects: clears OSF flag; schedule recalculated.
+
+> Automatic moves are disabled until the RTC is synced (year < 2020 or OSF set).
+> Manual moves always work (except in SAFETY_STOP / ERROR).
 
 ---
 
 ## POST `/api/manual`
 
-Manually commands the gate to open or close. Equivalent to pressing a physical button once.
-
-**Query parameter:** `action=open` or `action=close`
+Query: `action=open` or `action=close`. No body.
 
 ```
 POST /api/manual?action=open
 POST /api/manual?action=close
 ```
 
-No request body needed.
-
-**Response — 200 OK**
+**200 OK**
 
 ```json
 { "ok": true }
 ```
 
-**Response — 400 Bad Request**
+**400 Bad Request**
 
 ```json
 { "error": "invalid action" }
 ```
 
-Behaviour matches `manual_move()`:
-- No-op if gate is already in the requested position or already moving that direction
-- Interrupts opposite movement if currently `MOVING_OPEN/CLOSE`
-- Works from `SAFETY_STOP` (uses `RECOVERY` trigger → lands in `IDLE_*`, not `MANUAL_HOLD_*`)
+**409 Conflict**
+
+| State | `error` |
+|-------|---------|
+| `SAFETY_STOP` | `SAFETY_STOP: clear with physical button at the coop` |
+| `ERROR` | `ERROR: reboot required` |
+
+Behaviour (web source):
+- The web layer checks state itself for the 409 (R1); the bool returned by the controller is ignored.
+- Same direction as current state → no-op, still 200.
+- Opposite direction while moving → reverses (after coast dead-time, decision 11).
+- From `IDLE_*` / `MANUAL_HOLD_*` → lands in `MANUAL_HOLD_*`.
+- **Never** clears SAFETY_STOP. Only the physical button does (409 above).
 
 ---
 
 ## GET `/api/forecast`
 
-Returns pre-computed trigger schedule for upcoming days. Data is calculated on the fly — no storage.
+No query params. Always 14 days (fixed, R26). A query string is ignored.
 
-**Query parameter:** `days=N` (optional, default 30, max 90)
+```
+GET /api/forecast
+```
 
-**Response — 200 OK**
+**200 OK** — 14 entries (first 3 shown)
 
 ```json
 [
-  [330, 1110, 450, 1320],
-  [329, 1111, 449, 1321],
-  ...
+  [412, 1094],
+  [411, 1095],
+  [410, 1096]
 ]
 ```
 
-Each entry: `[window_open, window_close, abs_open, abs_close]` — minutes from midnight, local time.  
-Values are post-clamp (same logic as `_resolve_times()`).
-
-Use this endpoint to render the 30-day SVG forecast chart on the dashboard, or to verify seasonal config behaviour before deploying changes.
+Each entry: `[open, close]` minutes from local midnight, same rules as `/api/status`.
+Empty list `[]` when RTC unsynced.
 
 ---
 
-## GET `/api/logs`
+## GET `/api/log`
 
-Returns the full event log from the binary circular buffer on LittleFS.
+Recent events from the RAM buffer and file tail (Phase 6). **Newest first.**
 
-**Response — 200 OK**
+Fixed: newest 50 events. No query params, no 400 (R26). The file is read from its
+tail only, never the whole file (R24).
 
-```json
-[
-  {
-    "days_since_2025": 120,
-    "open_min": 378,
-    "close_min": 1095,
-    "manual_count": 0,
-    "error_count": 0
-  },
-  {
-    "days_since_2025": 121,
-    "open_min": null,
-    "close_min": null,
-    "manual_count": 0,
-    "error_count": 1
-  }
-]
+```
+GET /api/log
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `days_since_2025` | int | Days elapsed since 2025-01-01 |
-| `open_min` | int \| null | First open event of the day (minutes from midnight). `null` = no open |
-| `close_min` | int \| null | Last close event of the day (minutes from midnight). `null` = no close |
-| `manual_count` | int | Manual interventions that day |
-| `error_count` | int | Safety stop incidents that day |
-
-Records are returned oldest-first. Maximum 365 records (circular buffer wraps annually).  
-Returns `[]` if the log file does not exist.
+**200 OK** — JSON array, newest first, max 50. Empty `[]` until Phase 6 is built.
+Record format is defined in the Phase 6 doc.
 
 ---
 
 ## POST `/api/reboot`
 
-Performs a soft reset of the ESP32-C3.
+Soft reset of the ESP32-C3. No body. Allowed in any state (including ERROR, SAFETY_STOP).
+The log ring is flushed to file before the reset (R29).
 
-No request body.
-
-**Response — 200 OK** (returned before reset completes)
+**200 OK** (sent before reset, reset after ~200 ms)
 
 ```json
 { "ok": true }
 ```
 
-On CPython (local dev), this endpoint is a no-op and returns `200 OK`.
+On CPython (`run_local.py`) the reset is a no-op.
 
-> After reboot, the AP session ends. To reconnect, double-click a physical button again.
-
----
-
-## Static Pages
-
-The web server also serves the HTML UI:
-
-| URL | Page |
-|-----|------|
-| `/` | Status dashboard with live SSE updates and 30-day forecast SVG |
-| `/config` | Configuration editor with mode toggles and time sync |
-| `/logs` | Event log table |
-| `/debug` | Raw status values, WebREPL link, reboot button |
+> After reboot the AP session ends. Reconnect by holding both physical buttons for 3 s
+> (R7), or wait for the automatic AP if the RTC is still unsynced (R8).
 
 ---
 
-## Error Handling
+## GET `/api/diag`
 
-All 4xx errors return JSON:
+Diagnostics snapshot, computed per request. Never errors on a bare board: failed
+I2C probes give `false` / `null`.
+
+**200 OK**
 
 ```json
-{ "error": "human-readable message" }
+{
+  "rtc": true, "pcf": true, "osf": false,
+  "top": 1, "bottom": 0, "nfault": 1, "b_open": 1, "b_close": 1,
+  "mhz": 80, "mem": 117, "fs_kb": 800, "up_s": 42, "clients": null
+}
 ```
 
-I2C failures during a request do not cause HTTP errors — the controller transitions to `ERROR` state internally and subsequent `/api/status` calls will reflect `"state": "ERROR"`.
+| Field | Type | Description |
+|-------|------|-------------|
+| `rtc` | bool | DS3231 (0x68) answered `i2c.scan()` |
+| `pcf` | bool | PCF8574 (0x20) answered `i2c.scan()` |
+| `osf` | bool \| null | DS3231 OSF flag. `null` when `rtc` is `false` |
+| `top` / `bottom` | 0 \| 1 | Raw LIMIT_TOP / LIMIT_BOTTOM pin. `0` = hit |
+| `nfault` | 0 \| 1 | Raw DRV8833 nFAULT pin. `0` = fault |
+| `b_open` / `b_close` | 0 \| 1 | Raw BTN_OPEN / BTN_CLOSE pin. `0` = pressed |
+| `mhz` | int | CPU frequency, MHz |
+| `mem` | int | `gc.mem_free() // 1024`, KB |
+| `fs_kb` | int | Free flash in `/`, KB (`f_frsize * f_bavail`) |
+| `up_s` | int | Seconds from `ticks_ms()` (compat shim) |
+| `clients` | int \| null | AP stations connected. `null` when the AP is off |
+
+Only on device, with `main.py` wiring. `run_local.py` serves a fixed fake payload.
+
+## GET `/`
+
+`text/html`, the single-page UI. If the file is not uploaded yet: 503 JSON.
+
+---
+
+## Error handling summary
+
+| Code | When |
+|------|------|
+| 400 | Malformed JSON, wrong type, out of range, invalid action, invalid time, invalid AP password, GET-only key sent to POST /api/config |
+| 404 | Unknown path. Body `{"error": "not found"}` |
+| 409 | Manual move refused in SAFETY_STOP / ERROR |
+| 413 | Body larger than 2 KB (VERIFY on device) |
+| 500 | Config save failed (`save failed`); RTC write failed (`rtc write failed`, `/api/time`) |
+| 503 | UI file missing (`GET /`) |
+
+I2C failures during a request do not cause HTTP errors. The controller goes to
+`ERROR` internally after 3 consecutive failures; `/api/status` then reports
+`"state": "ERROR"`.

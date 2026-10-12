@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kurnik</title>
+<style>
+/* simple.css v2.3.7 - MIT License, Copyright (c) 2020 Kev Quirk
+   https://github.com/kevquirk/simple.css (minified build, inlined, unmodified) */
+:root{--sans-font:-apple-system,BlinkMacSystemFont,"Avenir Next",Avenir,"Nimbus Sans L",Roboto,"Noto Sans","Segoe UI",Arial,Helvetica,"Helvetica Neue",sans-serif;--mono-font:Consolas,Menlo,Monaco,"Andale Mono","Ubuntu Mono",monospace;--standard-border-radius:5px;--border-width:1px;--bg:#fff;--accent-bg:#f5f7ff;--text:#212121;--text-light:#585858;--border:#898ea4;--accent:#0d47a1;--accent-hover:#1266e2;--accent-text:var(--bg);--code:#d81b60;--preformatted:#444;--marked:#fd3;--disabled:#efefef}@media (prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#212121;--accent-bg:#2b2b2b;--text:#dcdcdc;--text-light:#ababab;--accent:#ffb300;--accent-hover:#ffe099;--accent-text:var(--bg);--code:#f06292;--preformatted:#ccc;--disabled:#111}img,video{opacity:.8}}*,:before,:after{box-sizing:border-box}textarea,select,input,progress{-webkit-appearance:none;-moz-appearance:none;appearance:none}html{font-family:var(--sans-font);scroll-behavior:smooth}body{color:var(--text);background-color:var(--bg);grid-template-columns:1fr min(45rem,90%) 1fr;margin:0;font-size:1.15rem;line-height:1.5;display:grid}body>*{grid-column:2}main{padding-top:1.5rem}h1{font-size:3rem}h2{margin-top:3rem;font-size:2.6rem}h3{margin-top:3rem;font-size:2rem}h4{font-size:1.44rem}h5{font-size:1.15rem}h6{font-size:.96rem}p{margin:1.5rem 0}p,h1,h2,h3,h4,h5,h6{overflow-wrap:break-word}h1,h2,h3{line-height:1.1}@media only screen and (width<=720px){h1{font-size:2.5rem}h2{font-size:2.1rem}h3{font-size:1.75rem}h4{font-size:1.25rem}}a,a:visited{color:var(--accent)}a:hover{text-decoration:none}button,.button,a.button,input[type=submit],input[type=reset],input[type=button]{border:var(--border-width)solid var(--accent);background-color:var(--accent);color:var(--accent-text);padding:.5rem .9rem;line-height:normal;text-decoration:none}.button[aria-disabled=true],input:disabled,textarea:disabled,select:disabled,button[disabled]{cursor:not-allowed;background-color:var(--disabled);border-color:var(--disabled);color:var(--text-light)}input[type=range]{padding:0}abbr[title]{cursor:help;text-decoration-line:underline;text-decoration-style:dotted}button:enabled:hover,.button:not([aria-disabled=true]):hover,input[type=submit]:enabled:hover,input[type=reset]:enabled:hover,input[type=button]:enabled:hover{background-color:var(--accent-hover);border-color:var(--accent-hover);cursor:pointer}.button:focus-visible,button:focus-visible:where(:enabled),input:enabled:focus-visible:where([type=submit],[type=reset],[type=button]){outline:2px solid var(--accent);outline-offset:1px}article,fieldset,dialog{border:var(--border-width)solid var(--border);border-radius:var(--standard-border-radius);margin-bottom:1rem;padding:1rem}table{border-collapse:collapse;margin:1.5rem 0}figure>table{width:max-content;margin:0}td,th{border:var(--border-width)solid var(--border);text-align:start;padding:.5rem}th{background-color:var(--accent-bg);font-weight:700}tr:nth-child(2n){background-color:var(--accent-bg)}table caption{margin-bottom:.5rem;font-weight:700}textarea,select,input,button,.button{font-size:inherit;border-radius:var(--standard-border-radius);box-shadow:none;max-width:100%;margin-bottom:.5rem;padding:.5em;font-family:inherit;display:inline-block}textarea,select,input{color:var(--text);background-color:var(--bg);border:var(--border-width)solid var(--border)}label{display:block}textarea:not([cols]){width:100%}input[type=checkbox],input[type=radio]{vertical-align:middle;width:min-content;position:relative}input[type=checkbox]+label,input[type=radio]+label{display:inline-block}input[type=radio]{border-radius:100%}input[type=checkbox]:checked,input[type=radio]:checked{background-color:var(--accent)}input[type=checkbox]:checked:after{content:" ";border-right:solid var(--bg).08em;border-bottom:solid var(--bg).08em;background-color:#0000;border-radius:0;width:.2em;height:.4em;font-size:1.8em;position:absolute;top:.04em;left:.18em;transform:rotate(45deg)}@media only screen and (width<=720px){textarea,select,input{width:100%}}img,video{border-radius:var(--standard-border-radius);max-width:100%;height:auto}code,samp{font-family:var(--mono-font);color:var(--code)}
+/* app overrides (after lib) */
+:root{--ok:#15803d;--warnc:#9a4a00;--errc:#b91c1c;--night:#0f172a;--sun:#facc15}
+@media (prefers-color-scheme:dark){:root{--ok:#4ade80;--warnc:#fbbf24;--errc:#f87171;--night:#020617;--sun:#eab308}}
+body{padding-bottom:calc(6.5rem + env(safe-area-inset-bottom))}
+main{max-width:32rem;margin:0 auto;padding:.6rem;display:flex;flex-direction:column;gap:.7rem}
+h2{font-size:1.1rem;margin:0 0 .5rem}
+p{margin:.3rem 0}
+.hidden{display:none!important}
+.panel{display:flex;flex-direction:column;gap:.7rem}
+.card{border:1px solid var(--border);border-radius:.6rem;padding:.8rem;margin:0;background:var(--accent-bg)}
+button{min-height:44px;padding:0 1rem;font-size:1rem}
+input{min-height:44px;font-size:16px;width:100%;padding:0 .5rem}
+input[type=checkbox]{width:1.4em;height:1.4em;min-height:0;padding:0;margin:0 .6rem 0 0;flex:none}
+.big{width:100%;min-height:64px;font-size:1.25rem;font-weight:700}
+.row{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}
+.ctl{display:grid;grid-template-columns:1fr 1fr;gap:.6rem}
+.banner{background:#fde68a;color:#111;padding:.5rem;border-radius:.4rem;font-weight:600}
+.banner:empty{display:none}
+#apwarn{background:#b91c1c;color:#fff;padding:.6rem;border-radius:.4rem;font-weight:700}
+.ok{color:var(--ok);font-weight:700}
+.err{color:var(--errc);font-weight:700}
+/* status tile */
+.tile{border-radius:.8rem;padding:1rem .8rem 1.1rem;text-align:center;color:#fff;background:#4b5563}
+.door{display:block;width:84px;height:84px;margin:0 auto .3rem;fill:currentColor}
+.lbl{font-size:2rem;font-weight:800;line-height:1.15;margin:.2rem 0 .4rem}
+.tile .sub{font-size:1rem;margin:.15rem 0}
+.rtcw{display:inline-block;background:rgba(0,0,0,.3);border-radius:.4rem;padding:.15rem .5rem;font-weight:700;margin-top:.2rem}
+.t-open{background:#15803d;color:#fff}
+.t-closed{background:#1e3a5f;color:#fff}
+.t-moving{background:#e6a100;color:#111;animation:pulse 1.8s ease-in-out infinite}
+.t-stop{background:#c2410c;color:#fff}
+.t-error{background:#b91c1c;color:#fff}
+.t-init{background:#4b5563;color:#fff}
+@keyframes pulse{50%{box-shadow:0 0 0 .5rem rgba(230,161,0,.35)}}
+@media (prefers-reduced-motion:reduce){.t-moving{animation:none}}
+/* next event + forecast */
+#next{font-size:1.15rem;font-weight:700;margin:.2rem 0 .4rem}
+.dbar{position:relative;height:2.4rem;border-radius:.4rem;background:var(--night);overflow:hidden;margin:.6rem 0 .2rem}
+#band{position:absolute;top:0;bottom:0;background:var(--sun)}
+#nowm{position:absolute;top:-.2rem;bottom:-.2rem;width:3px;margin-left:-1px;background:#fff;box-shadow:0 0 0 1px #000}
+.dlab{display:flex;justify-content:space-between;font-size:.9rem;color:var(--text-light)}
+.tw{overflow-x:auto}
+table{width:100%;margin:.6rem 0 0;font-size:1rem}
+th,td{border:0;border-bottom:1px solid var(--border);padding:.45rem .3rem;text-align:left}
+th{background:none;font-size:.9rem;color:var(--text-light);font-weight:600}
+tr:nth-child(2n){background:none}
+tr.today td{font-weight:700;color:var(--accent)}
+/* dziennik */
+.dhead{font-weight:700;margin:.7rem 0 .1rem;color:var(--text-light);font-size:.95rem}
+.evr{display:grid;grid-template-columns:1.8rem 3.4rem 1fr;gap:.3rem;align-items:baseline;padding:.5rem 0;border-bottom:1px solid var(--border)}
+.ic{font-weight:700;text-align:center;font-size:1.05rem}
+.ic.open{color:var(--ok)}
+.ic.close{color:var(--accent)}
+.ic.safety_stop{color:var(--warnc)}
+.ic.error{color:var(--errc)}
+.trg{color:var(--text-light);font-size:.9rem}
+.tm{font-variant-numeric:tabular-nums}
+/* ustawienia */
+fieldset{border:1px solid var(--border);border-radius:.6rem;padding:.4rem .8rem .6rem;margin:0 0 .7rem}
+legend{font-weight:700;padding:0 .3rem}
+label{display:block;margin:.5rem 0;font-weight:600}
+.hint{display:block;font-weight:400;color:var(--text-light);font-size:.9rem;margin-top:.15rem}
+label.chk{display:flex;align-items:center;min-height:44px;font-weight:400}
+/* toast */
+.toast{position:fixed;left:50%;bottom:calc(6rem + env(safe-area-inset-bottom));transform:translateX(-50%);background:#15803d;color:#fff;font-weight:700;padding:.7rem 1.3rem;border-radius:.6rem;opacity:0;transition:opacity .2s;pointer-events:none;z-index:20}
+.toast.show{opacity:1}
+/* bottom nav */
+.tabs{position:fixed;left:0;right:0;bottom:0;z-index:10;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));background:var(--bg);border-top:1px solid var(--border);padding-bottom:env(safe-area-inset-bottom)}
+.tabs button,.tabs button:enabled:hover{min-height:56px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.1rem;margin:0;padding:.3rem 0;border:0;border-radius:0;background:transparent;color:var(--text-light);font-size:.85rem;line-height:1.1}
+.tabs button.on,.tabs button.on:enabled:hover{color:var(--accent);box-shadow:inset 0 3px 0 var(--accent)}
+.tabs svg{width:26px;height:26px;fill:currentColor}
+</style>
+</head>
+<body>
+<main>
+<div id="banner" class="banner"></div>
+<div id="apwarn" class="hidden" role="alert">Ustaw hasło AP (sieć jest otwarta)</div>
+
+<div id="p-status" class="panel">
+<div id="tile" class="tile t-init" aria-live="polite">
+<svg class="door" viewBox="0 0 64 64" aria-hidden="true"><path d="M6 4h52v56H6z" fill="none" stroke="currentColor" stroke-width="3"/><path id="dp" d="M16 10h32v44H16z"/></svg>
+<div id="state" class="lbl">—</div>
+<p id="rtc" class="sub">RTC: —</p>
+<p id="rtcwarn" class="sub hidden"><span class="rtcw">⚠ zegar niezsynchronizowany</span></p>
+<p id="limits" class="sub"></p>
+</div>
+
+<div class="card">
+<h2>Następne zdarzenie</h2>
+<p id="next">—</p>
+<p id="autonote"></p>
+</div>
+
+<div class="card">
+<h2>Sterowanie</h2>
+<div class="ctl">
+<button id="bopen" class="big" type="button">▲ Otwórz</button>
+<button id="bclose" class="big" type="button">▼ Zamknij</button>
+</div>
+<p id="stopmsg" class="err" role="alert"></p>
+<p id="ctlerr" class="err" role="alert"></p>
+</div>
+
+<div class="card">
+<h2>Dziś i prognoza (14 dni)</h2>
+<div class="dbar"><div id="band"></div><div id="nowm"></div></div>
+<div class="dlab"><span>00</span><span>06</span><span>12</span><span>18</span><span>24</span></div>
+<p id="dtxt"></p>
+<p id="fcmsg" class="err"></p>
+<div class="tw"><table><thead><tr><th>Data</th><th>Otwarcie</th><th>Zamknięcie</th><th>Długość</th></tr></thead><tbody id="ftb"></tbody></table></div>
+</div>
+</div>
+
+<div id="p-dziennik" class="panel hidden">
+<div class="card">
+<h2>Ostatnie zdarzenia</h2>
+<div id="ev"></div>
+</div>
+<div class="card">
+<h2 id="logh">Dziennik</h2>
+<div id="log"></div>
+</div>
+</div>
+
+<div id="p-ustawienia" class="panel hidden">
+<form id="cfg" class="card" novalidate>
+<h2>Konfiguracja</h2>
+<fieldset>
+<legend>Lokalizacja</legend>
+<label>Szerokość geograficzna<input id="lat" type="number" step="any" inputmode="decimal"><span class="hint">stopnie, np. 50.01 (−90 … 90)</span></label>
+<label>Długość geograficzna<input id="lon" type="number" step="any" inputmode="decimal"><span class="hint">stopnie, np. 20.99 (−180 … 180)</span></label>
+<label>Wklej lokalizację (link Google Maps lub lat, lon)<input id="paste" type="text" autocomplete="off"></label>
+<span id="lmsg"></span>
+</fieldset>
+<fieldset>
+<legend>Harmonogram</legend>
+<label>Otwarcie po wschodzie słońca<input id="osr" type="number" inputmode="numeric"><span class="hint">minuty (−120 … 180)</span></label>
+<label>Zamknięcie po zmierzchu cywilnym<input id="cdu" type="number" inputmode="numeric"><span class="hint">minuty (−120 … 180)</span></label>
+<label>Otwieraj nie wcześniej niż<input id="onb" type="time"><span class="hint">puste = bez limitu</span></label>
+<label>Zamykaj nie później niż<input id="cna" type="time"><span class="hint">puste = bez limitu</span></label>
+</fieldset>
+<fieldset>
+<legend>Bezpieczeństwo</legend>
+<label>Timeout ruchu<input id="mto" type="number" inputmode="numeric"><span class="hint">sekundy (5 … 120); po przekroczeniu STOP awaryjny</span></label>
+</fieldset>
+<fieldset>
+<legend>Wi-Fi AP</legend>
+<label>Hasło AP<input id="pw" type="password" autocomplete="new-password"><span class="hint">8–63 znaków; puste = bez zmian</span></label>
+<label class="chk"><input id="clr" type="checkbox">Wyczyść hasło (otwarta sieć AP)</label>
+</fieldset>
+<div class="row"><button type="submit" class="big">Zapisz</button></div>
+<p id="cfgerr" class="err" role="alert"></p>
+</form>
+</div>
+
+<div id="p-system" class="panel hidden">
+<div class="card">
+<h2>Czas</h2>
+<div class="row"><button id="bsync" class="big" type="button">Synchronizuj czas z telefonem</button></div>
+<p id="syncres"></p>
+</div>
+<div class="card">
+<h2>Restart</h2>
+<div class="row"><button id="breboot" class="big" type="button">Restartuj urządzenie</button></div>
+<p id="rbmsg"></p>
+</div>
+</div>
+
+<div id="p-diag" class="panel hidden">
+<div class="card">
+<h2>Diagnostyka</h2>
+<table><tbody id="dtb"></tbody></table>
+<div class="row"><button id="bdiag" class="big" type="button">Sprawdź</button></div>
+<p id="diagmsg" class="err" role="alert"></p>
+<p class="hint">Na gołej płytce krańcówki pokazują "wolna"</p>
+</div>
+</div>
+</main>
+
+<nav class="tabs" role="tablist" aria-label="Nawigacja">
+<button id="t-status" role="tab" class="on" aria-selected="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-8 9 8v10h-6v-6H9v6H3z"/></svg><span>Status</span></button>
+<button id="t-dziennik" role="tab" aria-selected="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v2H4zM4 11h16v2H4zM4 17h10v2H4z"/></svg><span>Dziennik</span></button>
+<button id="t-ustawienia" role="tab" aria-selected="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h10v2H3zM17 6h4v2h-4zM3 16h4v2H3zM11 16h10v2H11zM9 3h2v6H9zM15 13h2v6h-2z"/></svg><span>Ustawienia</span></button>
+<button id="t-system" role="tab" aria-selected="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 2h2v10h-2zM6.3 5.6l1.4 1.4A6 6 0 1 0 16.3 7l1.4-1.4A8 8 0 1 1 6.3 5.6z"/></svg><span>System</span></button>
+<button id="t-diag" role="tab" aria-selected="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 5h-2v6l4.5 2.7 1-1.6-3.5-2.1z"/></svg><span>Diag</span></button>
+</nav>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script>
+const $ = id => document.getElementById(id);
+const pad = n => (n < 10 ? "0" : "") + n;
+const hm = m => m == null ? "" : pad(Math.floor(m / 60)) + ":" + pad(m % 60);
+const toMin = s => { const p = /^(\d{1,2}):(\d{2})$/.exec(s || ""); return p ? Number(p[1]) * 60 + Number(p[2]) : null; };
+const dur = d => { const h = Math.floor(d / 60), m = d % 60; return (h ? h + " h " : "") + m + " min"; };
+const pc = m => Math.min(100, Math.max(0, m / 14.4));
+const num = id => { const v = $(id).value.trim(); return v === "" ? NaN : Number(v); };
+const errText = r => r.body.error || ("HTTP " + r.status);
+const banner = t => { $("banner").textContent = t; };
+const say = (id, ok, t) => { $(id).className = ok ? "ok" : "err"; $(id).textContent = t; };
+const parseLoc = s => {
+  const P = [/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/, /@(-?\d+\.\d+),(-?\d+\.\d+)/, /[?&](?:q|ll|query)=(-?\d+\.\d+)(?:,|%2C)(-?\d+\.\d+)/, /(-?\d+[.,]\d+)[ ,;]+(-?\d+[.,]\d+)/];
+  for (const re of P) {
+    const m = re.exec(s);
+    if (!m) continue;
+    const lat = Number(m[1].replace(",", ".")), lon = Number(m[2].replace(",", "."));
+    return Math.abs(lat) <= 90 && Math.abs(lon) <= 180 ? [lat, lon] : "Poza zakresem (lat −90 … 90, lon −180 … 180)";
+  }
+  return /goo\.gl/.test(s) ? "Krótki link: otwórz go, skopiuj pełny adres z paska i wklej" : "Nie rozpoznano lokalizacji";
+};
+$("paste").oninput = () => {
+  const v = $("paste").value.trim();
+  if (!v) return say("lmsg", true, "");
+  const r = parseLoc(v);
+  if (typeof r === "string") return say("lmsg", false, r);
+  const [a, b] = r.map(x => x.toFixed(4));
+  $("lat").value = a;
+  $("lon").value = b;
+  say("lmsg", true, "OK: " + a + ", " + b);
+};
+const LBL = {INIT: "Start…", IDLE_OPEN: "Otwarte", IDLE_CLOSED: "Zamknięte", MOVING_OPEN: "Otwiera się…", MOVING_CLOSE: "Zamyka się…", MANUAL_HOLD_OPEN: "Otwarte (ręcznie)", MANUAL_HOLD_CLOSED: "Zamknięte (ręcznie)", SAFETY_STOP: "STOP awaryjny", ERROR: "BŁĄD"};
+const TILE = {IDLE_OPEN: "t-open", MANUAL_HOLD_OPEN: "t-open", IDLE_CLOSED: "t-closed", MANUAL_HOLD_CLOSED: "t-closed", MOVING_OPEN: "t-moving", MOVING_CLOSE: "t-moving", SAFETY_STOP: "t-stop", ERROR: "t-error"};
+const POSE = {IDLE_OPEN: "open", MANUAL_HOLD_OPEN: "open", MOVING_OPEN: "mid", MOVING_CLOSE: "mid", IDLE_CLOSED: "closed", MANUAL_HOLD_CLOSED: "closed"};
+const DOOR = {open: "M8 6l12 3v44L8 58z", mid: "M16 10l12 3v38l-12 3z", closed: "M16 10h32v44H16z"};
+const STOP = {SAFETY_STOP: "STOP awaryjny: odblokuj fizycznym przyciskiem przy kurniku", ERROR: "BŁĄD: wymagany restart urządzenia"};
+const EVN = {open: "otwarte", close: "zamknięte", safety_stop: "STOP awaryjny", error: "BŁĄD"};
+const TRN = {auto: "auto", manual: "ręcznie", recovery: "odzysk"};
+const ICON = {open: "▲", close: "▼", safety_stop: "⚠", error: "✖"};
+const TABS = ["status", "dziennik", "ustawienia", "system", "diag"];
+
+let busy = false, fails = 0, cfgFull = null, autoSynced = false, lastSt = null, fc = null, toastT = 0;
+
+async function call(method, path, body) {
+  const o = {method: method};
+  if (body !== undefined) { o.headers = {"Content-Type": "application/json"}; o.body = JSON.stringify(body); }
+  const r = await fetch(path, o);
+  let j = null;
+  try { j = await r.json(); } catch (e) {}
+  return {ok: r.ok, status: r.status, body: j || {}};
+}
+
+// server text always via textContent; events grouped by date
+function list(id, items) {
+  const c = $(id);
+  c.textContent = "";
+  if (!Array.isArray(items) || !items.length) { c.textContent = "—"; return; }
+  let day = null;
+  for (const e of items) {
+    if (typeof e === "string") {
+      const d = document.createElement("div");
+      d.className = "evr";
+      d.textContent = e;
+      c.appendChild(d);
+      continue;
+    }
+    const date = String(e.date || "—");
+    if (date !== day) {
+      day = date;
+      const h = document.createElement("div");
+      h.className = "dhead";
+      h.textContent = date;
+      c.appendChild(h);
+    }
+    const row = document.createElement("div");
+    row.className = "evr";
+    const ic = document.createElement("span");
+    ic.className = "ic " + String(e.kind || "");
+    ic.textContent = ICON[e.kind] || "•";
+    const tm = document.createElement("span");
+    tm.className = "tm";
+    tm.textContent = String(e.time || "");
+    const kd = document.createElement("span");
+    kd.textContent = EVN[e.kind] || String(e.kind || "");
+    const tr = document.createElement("small");
+    tr.className = "trg";
+    tr.textContent = " · " + (TRN[e.trigger] || String(e.trigger || ""));
+    kd.appendChild(tr);
+    row.append(ic, tm, kd);
+    c.appendChild(row);
+  }
+}
+
+function nextEvent() {
+  const s = lastSt, ts = s && s.today_schedule, now = s ? toMin(s.time) : null;
+  let t = "—";
+  if (ts && now !== null && s.rtc_synced !== false) {
+    if (now < ts.open) t = "Otwarcie dziś o " + hm(ts.open) + " (za " + dur(ts.open - now) + ")";
+    else if (now < ts.close) t = "Zamknięcie dziś o " + hm(ts.close) + " (za " + dur(ts.close - now) + ")";
+    else if (fc && fc.length > 1) t = "Otwarcie jutro o " + hm(fc[1][0]) + " (za " + dur(1440 - now + fc[1][0]) + ")";
+  }
+  $("next").textContent = t;
+}
+
+function dayBar() {
+  const s = lastSt, ts = s && s.today_schedule, now = s ? toMin(s.time) : null;
+  const ok = !!ts && now !== null && s.rtc_synced !== false;
+  $("band").classList.toggle("hidden", !ok);
+  $("nowm").classList.toggle("hidden", !ok);
+  if (!ok) { $("dtxt").textContent = "Dziś: brak danych (czas nieustawiony)"; return; }
+  const len = Math.max(0, ts.close - ts.open);
+  $("band").style.left = pc(ts.open) + "%";
+  $("band").style.width = pc(len) + "%";
+  $("nowm").style.left = pc(now) + "%";
+  $("dtxt").textContent = "Dziś: " + hm(ts.open) + " – " + hm(ts.close) + " (" + dur(len) + ")";
+}
+
+function render(s) {
+  lastSt = s;
+  const st = String(s.state || "");
+  const synced = s.rtc_synced !== false;
+  $("tile").className = "tile " + (TILE[st] || "t-init");
+  $("dp").setAttribute("d", DOOR[POSE[st]] || DOOR.closed);
+  $("state").textContent = LBL[st] || st || "—";
+  $("rtc").textContent = "RTC: " + (synced && s.time ? s.time : "—");
+  $("rtcwarn").classList.toggle("hidden", synced);
+  $("limits").textContent = "Góra " + (s.limit_top ? "✓" : "✗") + "  ·  Dół " + (s.limit_bottom ? "✓" : "✗");
+  const dis = st === "SAFETY_STOP" || st === "ERROR";
+  const atOpen = ["IDLE_OPEN", "MANUAL_HOLD_OPEN", "MOVING_OPEN"].includes(st);
+  const atClosed = ["IDLE_CLOSED", "MANUAL_HOLD_CLOSED", "MOVING_CLOSE"].includes(st);
+  $("bopen").disabled = dis || atOpen;
+  $("bclose").disabled = dis || atClosed;
+  $("stopmsg").textContent = STOP[st] || "";
+  banner(s.config_warning || "");
+  nextEvent();
+  dayBar();
+  list("ev", s.events);
+}
+
+async function poll() {
+  if (busy) return;
+  busy = true;
+  try {
+    const r = await call("GET", "/api/status");
+    if (!r.ok) throw new Error(r.status);
+    render(r.body);
+    if (r.body.rtc_synced === false && !autoSynced) autoSync();
+    fails = 0;
+  } catch (e) {
+    if (++fails >= 2) banner("Brak połączenia z kurnikiem");
+  } finally {
+    busy = false;
+  }
+}
+
+async function manual(action) {
+  $("ctlerr").textContent = "";
+  try {
+    const r = await call("POST", "/api/manual?action=" + action);
+    if (!r.ok) $("ctlerr").textContent = "Nie wykonano: " + errText(r);
+    else poll();
+  } catch (e) { $("ctlerr").textContent = "Błąd: " + e.message; }
+}
+$("bopen").onclick = () => manual("open");
+$("bclose").onclick = () => manual("close");
+
+const sendTime = () => call("POST", "/api/time", {timestamp_ms: Date.now()});
+
+$("bsync").onclick = async () => {
+  try {
+    const r = await sendTime();
+    say("syncres", r.ok, r.ok ? "Zsynchronizowano" : "Błąd: " + errText(r));
+  } catch (e) { say("syncres", false, "Błąd: " + e.message); }
+};
+
+// first rtc_synced === false seen -> one automatic sync from phone clock
+async function autoSync() {
+  autoSynced = true;
+  try {
+    const r = await sendTime();
+    say("autonote", r.ok, r.ok ? "Auto: czas wysłany z telefonu" : "Auto-sync błąd: " + errText(r));
+  } catch (e) { say("autonote", false, "Auto-sync błąd: " + e.message); }
+}
+
+function drawTable(rows) {
+  const tb = $("ftb"), base = new Date();
+  tb.textContent = "";
+  rows.forEach((r, i) => {
+    const d = new Date(base.getFullYear(), base.getMonth(), base.getDate() + i);
+    const tr = document.createElement("tr");
+    if (i === 0) tr.className = "today";
+    const cells = [pad(d.getDate()) + "." + pad(d.getMonth() + 1), hm(r[0]), hm(r[1]), dur(Math.max(0, r[1] - r[0]))];
+    for (const t of cells) {
+      const td = document.createElement("td");
+      td.textContent = t;
+      tr.appendChild(td);
+    }
+    tb.appendChild(tr);
+  });
+}
+
+async function loadForecast() {
+  try {
+    const r = await call("GET", "/api/forecast");
+    if (!r.ok) throw new Error(errText(r));
+    const rows = r.body;
+    const ok = Array.isArray(rows) && rows.length > 0;
+    fc = ok ? rows : null;
+    $("fcmsg").textContent = ok ? "" : "Brak danych (czas nieustawiony)";
+    drawTable(ok ? rows : []);
+  } catch (e) {
+    fc = null;
+    $("fcmsg").textContent = "Błąd: " + e.message;
+  }
+  nextEvent();
+}
+
+async function loadLog() {
+  try {
+    const r = await call("GET", "/api/log");
+    if (!r.ok) throw new Error(errText(r));
+    list("log", r.body);
+    const n = r.body.length;
+    $("logh").textContent = "Dziennik (" + (n >= 50 ? "ostatnie 50" : n) + ")";  // 50 = server limit (LOG_LIMIT)
+  } catch (e) { $("log").textContent = "Błąd: " + e.message; }
+}
+
+const DIAG = [
+  ["DS3231", d => [d.rtc ? "OK" : "brak", !d.rtc]],
+  ["PCF8574", d => [d.pcf ? "OK" : "brak", !d.pcf]],
+  ["Zegar (OSF)", d => d.osf == null ? ["—", false] : [d.osf ? "utracił czas" : "OK", !!d.osf]],
+  ["Krańcówka góra", d => [d.top ? "wolna" : "wciśnięta", false]],
+  ["Krańcówka dół", d => [d.bottom ? "wolna" : "wciśnięta", false]],
+  ["DRV8833 nFAULT", d => [d.nfault ? "OK" : "BŁĄD", !d.nfault]],
+  ["Przycisk Otwórz", d => [d.b_open ? "puszczony" : "wciśnięty", false]],
+  ["Przycisk Zamknij", d => [d.b_close ? "puszczony" : "wciśnięty", false]],
+  ["CPU", d => [d.mhz + " MHz", false]],
+  ["RAM wolne", d => [d.mem + " KB", false]],
+  ["Flash wolne", d => [d.fs_kb + " KB", false]],
+  ["Czas pracy", d => [Math.floor(d.up_s / 3600) + ":" + pad(Math.floor(d.up_s / 60) % 60), false]],
+  ["Klienci AP", d => [d.clients == null ? "—" : d.clients, false]],
+];
+
+async function loadDiag() {
+  $("diagmsg").textContent = "";
+  try {
+    const r = await call("GET", "/api/diag");
+    if (!r.ok) throw new Error(r.status === 404 ? "Brak /api/diag" : errText(r));
+    const tb = $("dtb");
+    tb.textContent = "";
+    for (const [name, f] of DIAG) {
+      const [v, bad] = f(r.body);
+      const tr = document.createElement("tr"), a = document.createElement("td"), b = document.createElement("td");
+      a.textContent = name;
+      b.textContent = String(v);
+      if (bad) b.className = "err";
+      tr.append(a, b);
+      tb.appendChild(tr);
+    }
+  } catch (e) {
+    $("dtb").textContent = "";
+    $("diagmsg").textContent = e.message;
+  }
+}
+
+function showTab(name, save) {
+  if (!TABS.includes(name)) name = "status";
+  for (const t of TABS) {
+    $("p-" + t).classList.toggle("hidden", t !== name);
+    $("t-" + t).classList.toggle("on", t === name);
+    $("t-" + t).setAttribute("aria-selected", String(t === name));
+  }
+  if (save) history.replaceState(null, "", "#" + name);
+  if (name === "dziennik") loadLog();
+  if (name === "diag") loadDiag();
+}
+for (const t of TABS) $("t-" + t).onclick = () => showTab(t, true);
+$("bdiag").onclick = loadDiag;
+
+async function loadCfg() {
+  try {
+    const r = await call("GET", "/api/config");
+    if (!r.ok) throw new Error(errText(r));
+    const c = cfgFull = r.body;
+    $("lat").value = c.location.lat;
+    $("lon").value = c.location.lon;
+    $("osr").value = c.schedule.open_after_sunrise_min;
+    $("cdu").value = c.schedule.close_after_dusk_min;
+    $("onb").value = hm(c.schedule.open_not_before_min);
+    $("cna").value = hm(c.schedule.close_not_after_min);
+    $("mto").value = c.safety.move_timeout_s;
+    $("pw").value = "";
+    $("pw").disabled = false;
+    $("clr").checked = false;
+    $("apwarn").classList.toggle("hidden", (c.wifi || {}).ap_password_set !== false);
+  } catch (e) { say("cfgerr", false, "Błąd: " + e.message); }
+}
+$("clr").onchange = () => { $("pw").disabled = $("clr").checked; };
+
+function toast(t) {
+  const el = $("toast");
+  el.textContent = t;
+  el.classList.add("show");
+  clearTimeout(toastT);
+  toastT = setTimeout(() => el.classList.remove("show"), 2200);
+}
+
+$("cfg").onsubmit = async e => {
+  e.preventDefault();
+  if (!cfgFull) { say("cfgerr", false, "Brak konfiguracji — odśwież stronę"); return; }
+  const f = {lat: num("lat"), lon: num("lon"), osr: num("osr"), cdu: num("cdu"), mto: num("mto")};
+  if (!Number.isFinite(f.lat) || !Number.isFinite(f.lon) || ![f.osr, f.cdu, f.mto].every(Number.isInteger)) {
+    say("cfgerr", false, "Wpisz liczby (minuty i timeout: całkowite)");
+    return;
+  }
+  const b = JSON.parse(JSON.stringify(cfgFull));
+  b.location.lat = f.lat;
+  b.location.lon = f.lon;
+  b.schedule.open_after_sunrise_min = f.osr;
+  b.schedule.close_after_dusk_min = f.cdu;
+  b.safety.move_timeout_s = f.mto;
+  b.schedule.open_not_before_min = toMin($("onb").value);
+  b.schedule.close_not_after_min = toMin($("cna").value);
+  b.wifi = b.wifi || {};
+  delete b.wifi.ap_password_set;
+  delete b.wifi.webrepl_password_set;
+  const pw = $("pw").value;
+  if ($("clr").checked) b.wifi.ap_password = "";
+  else if (pw !== "") b.wifi.ap_password = pw;
+  try {
+    const r = await call("POST", "/api/config", b);
+    if (!r.ok) { say("cfgerr", false, errText(r)); return; }
+    say("cfgerr", true, "");
+    toast("Zapisano");
+    await loadCfg();
+    loadForecast();
+  } catch (err) { say("cfgerr", false, "Błąd: " + err.message); }
+};
+
+$("breboot").onclick = async () => {
+  if (!confirm("Na pewno zrestartować urządzenie?")) return;
+  try {
+    const r = await call("POST", "/api/reboot");
+    if (r.ok) { say("rbmsg", true, "Restart…"); setTimeout(() => location.reload(), 5000); }
+    else say("rbmsg", false, errText(r));
+  } catch (e) { say("rbmsg", false, "Błąd: " + e.message); }
+};
+
+poll();
+setInterval(poll, 3000);
+loadCfg();
+loadForecast();
+setInterval(loadForecast, 600000);
+showTab(location.hash.slice(1), false);
+</script>
+</body>
+</html>

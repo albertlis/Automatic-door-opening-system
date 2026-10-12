@@ -1,325 +1,404 @@
 # Licensed under CC BY-NC-SA 4.0. Strictly non-commercial.
 import json
+import os
 
 import pytest
 
-from src.astro import sun_times_cet
-from src.config import (
+from astro import sun_times_cet
+from config import (
+    DEFAULTS,
     ConfigError,
-    abs_close_local,
-    abs_open_local,
     default_config,
     load,
     save,
+    schedule,
     validate_config,
-    window_close_local,
-    window_open_local,
 )
 
-# --- ConfigError ---
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+DEFAULT_JSON = os.path.join(ROOT, "config.default.json")
+SUMMER = (2026, 6, 15)  # DST active at 12:00
+WINTER = (2026, 12, 15)  # CET
 
 
-def test_config_error_is_exception():
-    assert issubclass(ConfigError, Exception)
-    assert str(ConfigError("boom")) == "boom"
-
-
-# --- default_config ---
-
-
-def test_default_config_loads():
+def _with(section, key, value):
     cfg = default_config()
-    assert cfg.window.mode == "sun_position"
-    assert cfg.override_open.mode == "dynamic"
-    assert cfg.override_close.mode == "fixed"
-    assert cfg.light.lux_open == 8.0
-    assert cfg.light.lux_close == 3.0
-    assert cfg.safety.move_timeout_s == 21
+    cfg[section][key] = value
+    return cfg
 
 
-def test_default_config_nested_values():
+def _write(tmp_path, name, data):
+    p = tmp_path / name
+    text = data if isinstance(data, str) else json.dumps(data)
+    p.write_text(text, encoding="utf-8")
+    return str(p)
+
+
+# --- default_config / config.default.json ---
+
+
+def test_default_config_equals_defaults():
+    assert default_config() == DEFAULTS
+
+
+def test_default_config_is_deep_copy():
     cfg = default_config()
-    assert cfg.window.legacy.hour_open == 6
-    assert cfg.window.legacy.hour_close == 18
-    assert cfg.window.sun.sunrise_offset_min == -30
-    assert cfg.window.sun.sunset_offset_min == 30
-    assert cfg.override_open.fixed_hour == 8
-    assert cfg.override_open.after_sunrise_min == 120
-    assert cfg.override_close.fixed_hour == 22
-    assert cfg.override_close.after_sunset_min == 120
+    cfg["location"]["lat"] = 0.0
+    cfg["safety"]["move_timeout_s"] = 99
+    assert DEFAULTS["location"]["lat"] == 50.01
+    assert DEFAULTS["safety"]["move_timeout_s"] == 21
 
 
-def test_default_config_independence():
-    """Two default_config() calls return independent objects — no shared mutable state."""
-    c1 = default_config()
-    c2 = default_config()
-    c1.light.lux_open = 99.0
-    assert c2.light.lux_open == 8.0
-
-
-# --- round-trip ---
-
-
-def test_roundtrip_save_load(tmp_path):
-    cfg = default_config()
-    path = str(tmp_path / "config.json")
-    save(cfg, path)
-    loaded = load(path)
-    assert loaded.window.mode == cfg.window.mode
-    assert loaded.window.sun.sunrise_offset_min == cfg.window.sun.sunrise_offset_min
-    assert loaded.override_open.after_sunrise_min == cfg.override_open.after_sunrise_min
-    assert loaded.override_close.fixed_hour == cfg.override_close.fixed_hour
-    assert loaded.light.lux_open == cfg.light.lux_open
-    assert loaded.safety.move_timeout_s == cfg.safety.move_timeout_s
-
-
-def test_roundtrip_preserves_unused_fields(tmp_path):
-    """Unused field (fixed_hour when mode=dynamic) survives save/load."""
-    cfg = default_config()
-    cfg.override_open.mode = "dynamic"
-    cfg.override_open.fixed_hour = 7
-    path = str(tmp_path / "config.json")
-    save(cfg, path)
-    loaded = load(path)
-    assert loaded.override_open.fixed_hour == 7
-
-
-def test_save_produces_valid_json(tmp_path):
-    cfg = default_config()
-    path = str(tmp_path / "config.json")
-    save(cfg, path)
-    with open(path) as f:
-        data = json.loads(f.read())
-    assert "window" in data
-    assert "light" in data
-    assert data["light"]["lux_open"] == 8.0
-    assert data["window"]["mode"] == "sun_position"
-
-
-# --- load config.default.json ---
-
-
-def test_load_default_json():
-    cfg = load("config.default.json")
-    assert cfg.window.mode == "sun_position"
+def test_default_json_matches_defaults():
+    with open(DEFAULT_JSON, encoding="utf-8") as f:
+        assert json.load(f) == DEFAULTS
+    assert load(DEFAULT_JSON) == DEFAULTS
 
 
 # --- load robustness ---
 
 
-def test_load_missing_nested_key(tmp_path):
-    """JSON without window.sun falls back to WindowSun defaults."""
-    data = {"window": {"mode": "sun_position", "legacy": {"hour_open": 6, "hour_close": 18}}}
-    path = str(tmp_path / "partial.json")
-    with open(path, "w") as f:
-        json.dump(data, f)
-    cfg = load(path)
-    assert cfg.window.sun.sunrise_offset_min == -30
-    assert cfg.window.sun.sunset_offset_min == 30
+@pytest.mark.parametrize(
+    "pw,ok",
+    [
+        ("", True),
+        ("abcd", True),
+        ("a" * 9, True),
+        ("abc", False),
+        ("a" * 10, False),
+        (None, False),
+        (1234, False),
+        ("ą" * 4, False),  # non-ASCII
+        ("abc\x01d", False),  # control char
+    ],
+)
+def test_validate_webrepl_password(pw, ok):
+    cfg = default_config()
+    cfg["wifi"]["webrepl_password"] = pw
+    if ok:
+        validate_config(cfg)
+    else:
+        with pytest.raises(ConfigError, match="webrepl_password"):
+            validate_config(cfg)
 
 
-def test_load_unknown_extra_keys(tmp_path):
-    """Extra unknown keys in JSON ignored, no crash."""
-    data = {
-        "window": {
-            "mode": "legacy",
-            "legacy": {"hour_open": 6, "hour_close": 18},
-            "sun": {"sunrise_offset_min": 0, "sunset_offset_min": 0},
-            "unknown_field": "ignored",
-        },
-        "override_open": {"mode": "fixed", "fixed_hour": 8, "after_sunrise_min": 120},
-        "override_close": {"mode": "fixed", "fixed_hour": 22, "after_sunset_min": 120},
-        "light": {"lux_open": 8.0, "lux_close": 3.0},
-        "safety": {"move_timeout_s": 21},
-        "future_section": {"foo": "bar"},
+def test_load_old_config_without_webrepl_key_gets_default(tmp_path):
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({"wifi": {"ap_password": "abcdefgh"}}))
+    cfg = load(str(p))
+    assert cfg["wifi"] == {"ap_password": "abcdefgh", "webrepl_password": ""}
+
+
+def test_load_missing_file_returns_defaults(tmp_path, capsys):
+    assert load(str(tmp_path / "nope.json")) == DEFAULTS
+    assert "config" in capsys.readouterr().out
+
+
+def test_load_corrupt_json_returns_defaults(tmp_path):
+    assert load(_write(tmp_path, "bad.json", "{not json")) == DEFAULTS
+
+
+def test_load_non_object_returns_defaults(tmp_path):
+    assert load(_write(tmp_path, "list.json", [1, 2])) == DEFAULTS
+
+
+def test_load_section_wrong_type_returns_defaults(tmp_path):
+    assert load(_write(tmp_path, "s.json", {"location": 5})) == DEFAULTS
+
+
+def test_load_partial_file_merges_over_defaults(tmp_path):
+    cfg = load(_write(tmp_path, "p.json", {"location": {"lat": 52.23}}))
+    assert cfg["location"] == {"lat": 52.23, "lon": 20.99}
+    assert cfg["schedule"] == DEFAULTS["schedule"]
+    assert cfg["safety"] == DEFAULTS["safety"]
+
+
+def test_load_invalid_value_returns_full_defaults(tmp_path):
+    data = {"location": {"lat": 52.23}, "safety": {"move_timeout_s": 500}}
+    # whole file rejected, not partially merged
+    assert load(_write(tmp_path, "inv.json", data)) == DEFAULTS
+
+
+def test_load_ignores_unknown_top_level_key(tmp_path):
+    data = {"future": {"x": 1}, "safety": {"move_timeout_s": 30}}
+    cfg = load(_write(tmp_path, "u.json", data))
+    assert cfg["safety"]["move_timeout_s"] == 30
+    assert "future" not in cfg
+
+
+# --- save ---
+
+
+def test_save_load_roundtrip_no_tmp_left(tmp_path):
+    cfg = default_config()
+    cfg["location"]["lat"] = 51.5
+    cfg["schedule"]["close_after_dusk_min"] = -15
+    path = str(tmp_path / "config.json")
+    save(cfg, path)
+    assert load(path) == cfg
+    assert not os.path.exists(path + ".tmp")
+
+
+def test_save_overwrites_existing_file(tmp_path):
+    path = str(tmp_path / "config.json")
+    save(default_config(), path)
+    cfg = _with("safety", "move_timeout_s", 30)
+    save(cfg, path)
+    assert load(path) == cfg
+    assert not os.path.exists(path + ".tmp")
+
+
+def test_save_invalid_writes_nothing(tmp_path):
+    path = str(tmp_path / "config.json")
+    with pytest.raises(ConfigError):
+        save(_with("safety", "move_timeout_s", 1), path)
+    assert not os.path.exists(path)
+    assert not os.path.exists(path + ".tmp")
+
+
+# --- validate_config: structure ---
+
+
+def test_validate_defaults_passes():
+    validate_config(default_config())
+
+
+def test_validate_rejects_unknown_top_level_key():
+    cfg = default_config()
+    cfg["light"] = {"lux_open": 8.0}
+    with pytest.raises(ConfigError):
+        validate_config(cfg)
+
+
+def test_validate_rejects_unknown_nested_key():
+    cfg = default_config()
+    cfg["schedule"]["sunrise_offset"] = 0
+    with pytest.raises(ConfigError):
+        validate_config(cfg)
+
+
+def test_validate_rejects_missing_top_level_key():
+    cfg = default_config()
+    del cfg["safety"]
+    with pytest.raises(ConfigError):
+        validate_config(cfg)
+
+
+def test_validate_rejects_missing_nested_key():
+    cfg = default_config()
+    del cfg["location"]["lon"]
+    with pytest.raises(ConfigError):
+        validate_config(cfg)
+
+
+def test_validate_rejects_non_dict_section():
+    cfg = default_config()
+    cfg["safety"] = [21]
+    with pytest.raises(ConfigError):
+        validate_config(cfg)
+
+
+# --- validate_config: types ---
+
+
+@pytest.mark.parametrize(
+    "section,key,value",
+    [
+        ("safety", "move_timeout_s", True),
+        ("schedule", "open_after_sunrise_min", True),
+        ("schedule", "close_after_dusk_min", False),
+        ("location", "lat", True),
+        ("location", "lon", False),
+    ],
+)
+def test_validate_rejects_bool(section, key, value):
+    with pytest.raises(ConfigError):
+        validate_config(_with(section, key, value))
+
+
+@pytest.mark.parametrize(
+    "section,key,value",
+    [
+        ("safety", "move_timeout_s", 21.0),
+        ("schedule", "open_after_sunrise_min", 30.5),
+        ("schedule", "close_after_dusk_min", "0"),
+        ("location", "lat", "50.0"),
+        ("location", "lat", None),
+    ],
+)
+def test_validate_rejects_wrong_type(section, key, value):
+    with pytest.raises(ConfigError):
+        validate_config(_with(section, key, value))
+
+
+# --- validate_config: wifi.ap_password (R6) ---
+
+
+@pytest.mark.parametrize(
+    "pw,ok",
+    [
+        ("", True),
+        ("x" * 8, True),
+        ("x" * 63, True),
+        ("x" * 7, False),
+        ("x" * 64, False),
+        (None, False),
+        (12345678, False),
+        ("A1!~" * 2, True),  # 8 printable ASCII
+        ("A1!~" * 15 + "xyz", True),  # 63 printable ASCII
+        ("ą" * 32, False),  # 32 chars, non-ASCII (WPA2 passphrase is ASCII only)
+        ("x" * 7 + "\x01", False),  # 8 chars, control char
+        ("x" * 7 + "\x7f", False),  # 8 chars, DEL is not printable
+    ],
+)
+def test_validate_ap_password(pw, ok):
+    cfg = default_config()
+    cfg["wifi"]["ap_password"] = pw
+    if ok:
+        validate_config(cfg)
+    else:
+        with pytest.raises(ConfigError):
+            validate_config(cfg)
+
+
+# --- validate_config: ranges ---
+
+
+@pytest.mark.parametrize(
+    "section,key,value",
+    [
+        ("location", "lat", 90.01),
+        ("location", "lat", -90.01),
+        ("location", "lon", 180.01),
+        ("location", "lon", -180.01),
+        ("schedule", "open_after_sunrise_min", -121),
+        ("schedule", "open_after_sunrise_min", 181),
+        ("schedule", "close_after_dusk_min", -121),
+        ("schedule", "close_after_dusk_min", 181),
+        ("safety", "move_timeout_s", 4),
+        ("safety", "move_timeout_s", 121),
+    ],
+)
+def test_validate_rejects_out_of_range(section, key, value):
+    with pytest.raises(ConfigError):
+        validate_config(_with(section, key, value))
+
+
+@pytest.mark.parametrize(
+    "section,key,value",
+    [
+        ("location", "lat", 90),
+        ("location", "lat", -90.0),
+        ("location", "lon", -180),
+        ("location", "lon", 180.0),
+        ("schedule", "open_after_sunrise_min", -120),
+        ("schedule", "close_after_dusk_min", 180),
+        ("safety", "move_timeout_s", 5),
+        ("safety", "move_timeout_s", 120),
+    ],
+)
+def test_validate_accepts_boundaries(section, key, value):
+    validate_config(_with(section, key, value))
+
+
+# --- schedule ---
+
+
+def _sun(date, alt):
+    loc = DEFAULTS["location"]
+    return sun_times_cet(*date, loc["lat"], loc["lon"], alt_deg=alt)
+
+
+def test_schedule_summer_includes_dst():
+    rise, _ = _sun(SUMMER, -0.833)
+    _, dusk = _sun(SUMMER, -6)
+    open_min, close_min = schedule(default_config(), *SUMMER)
+    assert open_min == rise + 60 + 30
+    assert close_min == dusk + 60 + 0
+
+
+def test_schedule_winter_no_dst():
+    rise, _ = _sun(WINTER, -0.833)
+    _, dusk = _sun(WINTER, -6)
+    open_min, close_min = schedule(default_config(), *WINTER)
+    assert open_min == rise + 30
+    assert close_min == dusk
+
+
+def test_schedule_close_is_civil_dusk_plus_offset():
+    cfg = _with("schedule", "close_after_dusk_min", -45)
+    _, dusk = _sun(SUMMER, -6)
+    _, close_min = schedule(cfg, *SUMMER)
+    assert close_min == dusk + 60 - 45
+
+
+@pytest.mark.parametrize("date", [(2026, 3, 29), (2026, 6, 15), (2026, 10, 25), (2026, 12, 21)])
+def test_schedule_open_before_close(date):
+    open_min, close_min = schedule(default_config(), *date)
+    assert open_min < close_min
+
+
+# --- schedule clamps: open_not_before_min / close_not_after_min ---
+
+
+def test_default_clamps_are_none():
+    assert DEFAULTS["schedule"]["open_not_before_min"] is None
+    assert DEFAULTS["schedule"]["close_not_after_min"] is None
+
+
+def test_clamp_none_keeps_offset_schedule():
+    rise, _ = _sun(SUMMER, -0.833)
+    _, dusk = _sun(SUMMER, -6)
+    open_min, close_min = schedule(default_config(), *SUMMER)
+    assert open_min == rise + 60 + 30
+    assert close_min == dusk + 60
+
+
+def test_clamp_open_not_before_raises_early_open():
+    unclamped, _ = schedule(default_config(), *SUMMER)
+    assert unclamped < 360  # June Tarnow: open earlier than 06:00 without clamp
+    open_min, _ = schedule(_with("schedule", "open_not_before_min", 360), *SUMMER)
+    assert open_min == 360
+
+
+def test_clamp_open_not_before_no_effect_when_already_later():
+    unclamped, _ = schedule(default_config(), *SUMMER)
+    open_min, _ = schedule(_with("schedule", "open_not_before_min", 100), *SUMMER)
+    assert open_min == unclamped
+
+
+def test_clamp_close_not_after_lowers_late_close():
+    unclamped_close = schedule(default_config(), *SUMMER)[1]
+    assert unclamped_close > 1000
+    _, close_min = schedule(_with("schedule", "close_not_after_min", 1000), *SUMMER)
+    assert close_min == 1000
+
+
+def test_clamp_close_not_after_no_effect_when_already_earlier():
+    unclamped_close = schedule(default_config(), *SUMMER)[1]
+    _, close_min = schedule(_with("schedule", "close_not_after_min", 1439), *SUMMER)
+    assert close_min == unclamped_close
+
+
+@pytest.mark.parametrize("key", ["open_not_before_min", "close_not_after_min"])
+@pytest.mark.parametrize("value", [True, False, 1440, -1, 360.0, "360"])
+def test_validate_rejects_bad_clamp(key, value):
+    with pytest.raises(ConfigError):
+        validate_config(_with("schedule", key, value))
+
+
+@pytest.mark.parametrize("key", ["open_not_before_min", "close_not_after_min"])
+@pytest.mark.parametrize("value", [None, 0, 360, 1439])
+def test_validate_accepts_clamp(key, value):
+    validate_config(_with("schedule", key, value))
+
+
+def test_load_old_config_without_clamp_keys(tmp_path):
+    data = {"schedule": {"open_after_sunrise_min": 45, "close_after_dusk_min": 10}}
+    cfg = load(_write(tmp_path, "old.json", data))
+    assert cfg["schedule"] == {
+        "open_after_sunrise_min": 45,
+        "close_after_dusk_min": 10,
+        "open_not_before_min": None,
+        "close_not_after_min": None,
     }
-    path = str(tmp_path / "extra.json")
-    with open(path, "w") as f:
-        json.dump(data, f)
-    cfg = load(path)
-    assert cfg.window.mode == "legacy"
-
-
-def test_load_empty_json(tmp_path):
-    """Completely empty JSON dict → all defaults."""
-    path = str(tmp_path / "empty.json")
-    with open(path, "w") as f:
-        json.dump({}, f)
-    cfg = load(path)
-    assert cfg.window.mode == "sun_position"
-    assert cfg.light.lux_open == 8.0
-
-
-# --- validate_config: valid ---
-
-
-def test_validate_default_config_sun_position():
-    cfg = default_config()
-    rise, sset = sun_times_cet(2024, 6, 1)
-    validate_config(cfg, now_local_min=600, rise_cet=rise, set_cet=sset, dst_offset=60)
-    # must not raise
-
-
-def test_validate_legacy_mode():
-    cfg = default_config()
-    cfg.window.mode = "legacy"
-    cfg.override_open.mode = "fixed"
-    cfg.override_open.fixed_hour = 8  # ao=480
-    cfg.override_close.mode = "fixed"
-    cfg.override_close.fixed_hour = 22  # ac=1320
-    # wo=360, wc=1080; 480>=360, 1320>=1080, 480<1320 → valid
-    validate_config(cfg, now_local_min=0, rise_cet=300, set_cet=1100, dst_offset=0)
-
-
-def test_validate_ao_equals_wo_passes():
-    """ao == wo is valid (ao < wo is the only failing condition)."""
-    cfg = default_config()
-    cfg.window.mode = "legacy"
-    cfg.window.legacy.hour_open = 8  # wo=480
-    cfg.override_open.mode = "fixed"
-    cfg.override_open.fixed_hour = 8  # ao=480 == wo → still valid
-    cfg.override_close.mode = "fixed"
-    cfg.override_close.fixed_hour = 22  # ac=1320
-    validate_config(cfg, now_local_min=0, rise_cet=300, set_cet=1100, dst_offset=0)
-
-
-def test_validate_ac_equals_wc_passes():
-    """ac == wc is valid (ac < wc is the only failing condition)."""
-    cfg = default_config()
-    cfg.window.mode = "legacy"
-    cfg.window.legacy.hour_close = 18  # wc=1080
-    cfg.override_open.mode = "fixed"
-    cfg.override_open.fixed_hour = 8  # ao=480 >= wo=360 ✓
-    cfg.override_close.mode = "fixed"
-    cfg.override_close.fixed_hour = 18  # ac=1080 == wc=1080 → passes check 2
-    validate_config(cfg, now_local_min=0, rise_cet=300, set_cet=1100, dst_offset=0)
-
-
-# --- validate_config: errors ---
-
-
-def test_validate_abs_open_before_window_open():
-    cfg = default_config()
-    cfg.window.mode = "legacy"
-    cfg.window.legacy.hour_open = 8  # wo=480
-    cfg.override_open.mode = "fixed"
-    cfg.override_open.fixed_hour = 6  # ao=360 < wo=480 → error
-    cfg.override_close.mode = "fixed"
-    cfg.override_close.fixed_hour = 22
-    with pytest.raises(ConfigError, match="abs_open"):
-        validate_config(cfg, now_local_min=0, rise_cet=300, set_cet=1100, dst_offset=0)
-
-
-def test_validate_abs_open_before_window_open_dynamic():
-    """Dynamic modes: ao < wo when after_sunrise_min < sunrise_offset_min."""
-    cfg = default_config()
-    cfg.window.mode = "sun_position"
-    cfg.window.sun.sunrise_offset_min = 60  # wo = 300+0+60 = 360
-    cfg.override_open.mode = "dynamic"
-    cfg.override_open.after_sunrise_min = 30  # ao = 300+0+30 = 330 < 360 → error
-    cfg.override_close.mode = "fixed"
-    cfg.override_close.fixed_hour = 22
-    with pytest.raises(ConfigError, match="abs_open"):
-        validate_config(cfg, now_local_min=0, rise_cet=300, set_cet=1100, dst_offset=0)
-
-
-def test_validate_abs_close_before_window_close():
-    cfg = default_config()
-    cfg.window.mode = "legacy"
-    cfg.window.legacy.hour_close = 20  # wc=1200
-    cfg.override_open.mode = "fixed"
-    cfg.override_open.fixed_hour = 8  # ao=480 >= wo=360 → passes check 1
-    cfg.override_close.mode = "fixed"
-    cfg.override_close.fixed_hour = 18  # ac=1080 < wc=1200 → error
-    with pytest.raises(ConfigError, match="abs_close"):
-        validate_config(cfg, now_local_min=0, rise_cet=300, set_cet=1100, dst_offset=0)
-
-
-def test_validate_abs_open_equals_abs_close():
-    """ao == ac raises (>= condition)."""
-    cfg = default_config()
-    cfg.window.mode = "legacy"
-    cfg.window.legacy.hour_close = 10  # wc=600 so ac=600 passes check 2
-    cfg.override_open.mode = "fixed"
-    cfg.override_open.fixed_hour = 10  # ao=600
-    cfg.override_close.mode = "fixed"
-    cfg.override_close.fixed_hour = 10  # ac=600 == ao → ao >= ac → error
-    with pytest.raises(ConfigError, match=">="):
-        validate_config(cfg, now_local_min=0, rise_cet=300, set_cet=1100, dst_offset=0)
-
-
-def test_validate_abs_open_greater_than_abs_close():
-    """ao > ac raises (>= condition)."""
-    cfg = default_config()
-    cfg.window.mode = "legacy"
-    cfg.window.legacy.hour_close = 10  # wc=600 so ac=600 passes check 2 (not strict)
-    cfg.override_open.mode = "fixed"
-    cfg.override_open.fixed_hour = 12  # ao=720
-    cfg.override_close.mode = "fixed"
-    cfg.override_close.fixed_hour = 10  # ac=600, ac >= wc=600 passes check 2
-    # ao=720 >= ac=600 → error
-    with pytest.raises(ConfigError, match=">="):
-        validate_config(cfg, now_local_min=0, rise_cet=300, set_cet=1100, dst_offset=0)
-
-
-# --- helper functions: 4 functions × 2 modes = 8 tests ---
-
-
-def test_window_open_legacy():
-    cfg = default_config()
-    cfg.window.mode = "legacy"
-    cfg.window.legacy.hour_open = 6
-    assert window_open_local(cfg, rise_cet=200, dst=60) == 360  # 6*60, ignores rise+dst
-
-
-def test_window_open_sun_position():
-    cfg = default_config()
-    cfg.window.mode = "sun_position"
-    cfg.window.sun.sunrise_offset_min = -30
-    # rise=200, dst=60 → 200+60-30=230
-    assert window_open_local(cfg, rise_cet=200, dst=60) == 230
-
-
-def test_window_close_legacy():
-    cfg = default_config()
-    cfg.window.mode = "legacy"
-    cfg.window.legacy.hour_close = 18
-    assert window_close_local(cfg, set_cet=1000, dst=60) == 1080  # 18*60, ignores set+dst
-
-
-def test_window_close_sun_position():
-    cfg = default_config()
-    cfg.window.mode = "sun_position"
-    cfg.window.sun.sunset_offset_min = 30
-    # set=1000, dst=60 → 1000+60+30=1090
-    assert window_close_local(cfg, set_cet=1000, dst=60) == 1090
-
-
-def test_abs_open_fixed():
-    cfg = default_config()
-    cfg.override_open.mode = "fixed"
-    cfg.override_open.fixed_hour = 8
-    assert abs_open_local(cfg, rise_cet=200, dst=60) == 480  # 8*60, ignores rise+dst
-
-
-def test_abs_open_dynamic():
-    cfg = default_config()
-    cfg.override_open.mode = "dynamic"
-    cfg.override_open.after_sunrise_min = 120
-    # rise=200, dst=60 → 200+60+120=380
-    assert abs_open_local(cfg, rise_cet=200, dst=60) == 380
-
-
-def test_abs_close_fixed():
-    cfg = default_config()
-    cfg.override_close.mode = "fixed"
-    cfg.override_close.fixed_hour = 22
-    assert abs_close_local(cfg, set_cet=1000, dst=60) == 1320  # 22*60
-
-
-def test_abs_close_dynamic():
-    cfg = default_config()
-    cfg.override_close.mode = "dynamic"
-    cfg.override_close.after_sunset_min = 120
-    # set=1000, dst=60 → 1000+60+120=1180
-    assert abs_close_local(cfg, set_cet=1000, dst=60) == 1180

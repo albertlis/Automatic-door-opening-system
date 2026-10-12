@@ -1,262 +1,271 @@
 # State Machine & Control Logic — Smart Coop V2
 
-## State Diagram
+Source of truth for implemented code: `src/state.py` (phases 1-3), `src/config.py`, `src/astro.py`.
+Planned changes (phase 4 and later) are marked **PLANNED** and cite owner decision numbers from docs/decisions.md or resolutions R1-R23 ("Cross-doc resolutions") and R24-R40 ("Review round 3").
+Light sensor removed; no light-based logic anywhere.
+
+---
+
+## 1. State Diagram
 
 ```mermaid
 stateDiagram-v2
     [*] --> INIT
 
-    INIT --> IDLE_OPEN        : LIMIT_TOP active
-    INIT --> IDLE_CLOSED      : LIMIT_BOTTOM active
-    INIT --> MOVING_OPEN      : both inactive, is_daytime() = true [AUTO]
-    INIT --> MOVING_CLOSE     : both inactive, is_daytime() = false [AUTO]
-    INIT --> ERROR            : both limits active simultaneously
+    INIT --> IDLE_OPEN        : LIMIT_TOP active (2 consistent reads, decision 12)
+    INIT --> IDLE_CLOSED      : LIMIT_BOTTOM active (2 consistent reads)
+    INIT --> MOVING_OPEN      : neither limit, desired()=open [AUTO]
+    INIT --> MOVING_CLOSE     : neither limit, desired()!=open [AUTO] (incl. RTC unsynced, R9)
+    INIT --> ERROR            : both limits active (2 consistent reads, R37)
+    INIT --> MOVING_OPEN      : open button or web [MANUAL] (R37)
+    INIT --> MOVING_CLOSE     : close button or web [MANUAL] (R37)
 
-    IDLE_CLOSED --> MOVING_OPEN   : sensor_open OR abs_open [AUTO]
-    IDLE_OPEN   --> MOVING_CLOSE  : sensor_close OR abs_close [AUTO]
+    IDLE_CLOSED --> MOVING_OPEN   : desired()=open [AUTO]
+    IDLE_OPEN   --> MOVING_CLOSE  : desired()=closed [AUTO]
+    IDLE_CLOSED --> MOVING_OPEN   : manual open [MANUAL]
+    IDLE_OPEN   --> MOVING_CLOSE  : manual close [MANUAL]
 
-    IDLE_CLOSED --> MOVING_OPEN   : BTN_OPEN pressed [MANUAL]
-    IDLE_OPEN   --> MOVING_CLOSE  : BTN_CLOSE pressed [MANUAL]
+    MOVING_OPEN  --> IDLE_OPEN         : LIMIT_TOP hit [AUTO or RECOVERY]
+    MOVING_OPEN  --> MANUAL_HOLD_OPEN  : LIMIT_TOP hit [MANUAL]
+    MOVING_OPEN  --> SAFETY_STOP       : timeout or nFAULT LOW
+    MOVING_OPEN  --> MOVING_CLOSE      : manual close, reversal [MANUAL] (dead-time 200 ms, decision 11, stop order R19)
 
-    MOVING_OPEN  --> IDLE_OPEN         : LIMIT_TOP hit [trigger=AUTO or RECOVERY]
-    MOVING_OPEN  --> MANUAL_HOLD_OPEN  : LIMIT_TOP hit [trigger=MANUAL]
-    MOVING_OPEN  --> SAFETY_STOP       : timeout (21 s) or nFAULT LOW
+    MOVING_CLOSE --> IDLE_CLOSED        : LIMIT_BOTTOM hit [AUTO or RECOVERY]
+    MOVING_CLOSE --> MANUAL_HOLD_CLOSED : LIMIT_BOTTOM hit [MANUAL]
+    MOVING_CLOSE --> SAFETY_STOP        : timeout or nFAULT LOW
+    MOVING_CLOSE --> MOVING_OPEN        : manual open, reversal [MANUAL] (dead-time 200 ms, stop order R19)
 
-    MOVING_CLOSE --> IDLE_CLOSED        : LIMIT_BOTTOM hit [trigger=AUTO or RECOVERY]
-    MOVING_CLOSE --> MANUAL_HOLD_CLOSED : LIMIT_BOTTOM hit [trigger=MANUAL]
-    MOVING_CLOSE --> SAFETY_STOP        : timeout (21 s) or nFAULT LOW
+    MANUAL_HOLD_OPEN   --> IDLE_OPEN      : desired() changed since hold start (hold expires)
+    MANUAL_HOLD_CLOSED --> IDLE_CLOSED    : desired() changed since hold start (hold expires)
+    MANUAL_HOLD_OPEN   --> MOVING_CLOSE   : manual close [MANUAL]
+    MANUAL_HOLD_CLOSED --> MOVING_OPEN    : manual open [MANUAL]
 
-    MANUAL_HOLD_OPEN   --> MOVING_CLOSE : abs_close trigger [AUTO]
-    MANUAL_HOLD_CLOSED --> MOVING_OPEN  : abs_open trigger [AUTO]
-    MANUAL_HOLD_OPEN   --> MOVING_CLOSE : BTN_CLOSE pressed [MANUAL]
-    MANUAL_HOLD_CLOSED --> MOVING_OPEN  : BTN_OPEN pressed [MANUAL]
+    SAFETY_STOP --> MOVING_OPEN  : open button [RECOVERY] (web refused, decision 1)
+    SAFETY_STOP --> MOVING_CLOSE : close button [RECOVERY] (web refused, decision 1)
 
-    SAFETY_STOP --> MOVING_OPEN  : BTN_OPEN pressed [RECOVERY]
-    SAFETY_STOP --> MOVING_CLOSE : BTN_CLOSE pressed [RECOVERY]
-
-    ERROR --> [*] : reboot only (POST /api/reboot or physical reset)
+    ERROR --> [*] : reboot only (POST /api/reboot or power cycle)
 ```
 
 ---
 
-## States Reference
+## 2. States
 
-| State | Meaning | LED |
-|-------|---------|-----|
-| `INIT` | Startup — reading limit switches, deciding initial direction | — |
-| `IDLE_OPEN` | Door fully open, auto logic active | 🟢 Green solid |
-| `IDLE_CLOSED` | Door fully closed, auto logic active | 🔴 Red solid |
-| `MOVING_OPEN` | Door travelling upward | 🟢 Green 1 Hz blink |
-| `MOVING_CLOSE` | Door travelling downward | 🟢 Green 1 Hz blink |
-| `MANUAL_HOLD_OPEN` | Opened manually — auto sensor/time blocked until backstop | 🟢 Green solid |
-| `MANUAL_HOLD_CLOSED` | Closed manually — auto sensor/time blocked until backstop | 🔴 Red solid |
-| `SAFETY_STOP` | Motor stopped by timeout or nFAULT — manual recovery required | 🔴 Red 1 Hz blink |
-| `ERROR` | I2C failure / both limit switches active — reboot required | 🔴 Red 4 Hz blink |
+| State | Meaning | Motor | Green | Red | Yellow overlay |
+|-------|---------|-------|-------|-----|----------------|
+| `INIT` | Startup, reading limits (2 consistent reads, R37). Manual move allowed (MANUAL) | off | off | off | off (R23) |
+| `IDLE_OPEN` | Door at top limit, auto logic active | off | solid | off | per RTC |
+| `IDLE_CLOSED` | Door at bottom limit, auto logic active | off | off | solid | per RTC |
+| `MOVING_OPEN` | Travelling up | forward | 1 Hz | off | per RTC |
+| `MOVING_CLOSE` | Travelling down | backward | 1 Hz | off | per RTC |
+| `MANUAL_HOLD_OPEN` | Opened by hand; auto blocked until `desired()` changes | off | solid | off | per RTC |
+| `MANUAL_HOLD_CLOSED` | Closed by hand; auto blocked until `desired()` changes | off | off | solid | per RTC |
+| `SAFETY_STOP` | Stopped by timeout or nFAULT; only physical button clears (decision 1, R23: AP does not clear) | off | off | 1 Hz | per RTC |
+| `ERROR` | I2C dead / both limits / motor driver unreachable / DS3231 missing at boot (R18); reboot only | off | off | 4 Hz | per RTC |
 
-> `ERROR` is distinguishable from `SAFETY_STOP` by blink speed (4 Hz vs 1 Hz).  
-> `LED_RED` (GPIO6) is wired directly — works even when I2C / PCF8574 is dead.
-
-### Battery Low Overlay
-
-When RTC battery voltage < 2.7 V, `LED_YELLOW` blinks 1 Hz **regardless of gate state** — it overlays the primary LED pattern.
+Notes:
+- Section 9 LED table is authoritative if the two tables disagree.
+- `ERROR` is distinguishable from `SAFETY_STOP` by blink rate only (4 Hz vs 1 Hz).
+- `LED_RED` is GPIO6 direct; works when I2C/PCF8574 is dead. Green and yellow are on PCF8574.
 
 ---
 
-## Movement Trigger
+## 3. Movement Ownership (single owner)
 
-`MovementTrigger` is set at the start of each movement and determines the destination state when the limit switch is reached:
-
-| Trigger | Set by | After limit hit |
-|---------|--------|----------------|
-| `AUTO` | Automatic decision (sensor / time / abs override) | → `IDLE_OPEN` or `IDLE_CLOSED` |
-| `MANUAL` | Button press or web UI in normal state | → `MANUAL_HOLD_OPEN` or `MANUAL_HOLD_CLOSED` |
-| `RECOVERY` | Button press from `SAFETY_STOP` | → `IDLE_OPEN` or `IDLE_CLOSED` (auto logic resumes) |
-
----
-
-## Complete Transition Table
-
-| From state | Condition | To state | Trigger |
-|-----------|-----------|----------|---------|
-| `INIT` | `LIMIT_TOP` active, `LIMIT_BOTTOM` inactive | `IDLE_OPEN` | — |
-| `INIT` | `LIMIT_BOTTOM` active, `LIMIT_TOP` inactive | `IDLE_CLOSED` | — |
-| `INIT` | Both inactive, `is_daytime()=True` | `MOVING_OPEN` | AUTO |
-| `INIT` | Both inactive, `is_daytime()=False` | `MOVING_CLOSE` | AUTO |
-| `INIT` | Both limits active | `ERROR` | — |
-| `IDLE_CLOSED` | `sensor_open` | `MOVING_OPEN` | AUTO |
-| `IDLE_CLOSED` | `abs_open` | `MOVING_OPEN` | AUTO |
-| `IDLE_CLOSED` | BTN_OPEN / web manual | `MOVING_OPEN` | MANUAL |
-| `IDLE_OPEN` | `sensor_close` | `MOVING_CLOSE` | AUTO |
-| `IDLE_OPEN` | `abs_close` | `MOVING_CLOSE` | AUTO |
-| `IDLE_OPEN` | BTN_CLOSE / web manual | `MOVING_CLOSE` | MANUAL |
-| `MOVING_OPEN` | `LIMIT_TOP` hit, trigger=AUTO or RECOVERY | `IDLE_OPEN` | — |
-| `MOVING_OPEN` | `LIMIT_TOP` hit, trigger=MANUAL | `MANUAL_HOLD_OPEN` | — |
-| `MOVING_OPEN` | Timeout > 21 s | `SAFETY_STOP` | — |
-| `MOVING_OPEN` | `nFAULT` LOW | `SAFETY_STOP` | — |
-| `MOVING_CLOSE` | `LIMIT_BOTTOM` hit, trigger=AUTO or RECOVERY | `IDLE_CLOSED` | — |
-| `MOVING_CLOSE` | `LIMIT_BOTTOM` hit, trigger=MANUAL | `MANUAL_HOLD_CLOSED` | — |
-| `MOVING_CLOSE` | Timeout > 21 s | `SAFETY_STOP` | — |
-| `MOVING_CLOSE` | `nFAULT` LOW | `SAFETY_STOP` | — |
-| `MANUAL_HOLD_OPEN` | `abs_close` trigger | `MOVING_CLOSE` | AUTO |
-| `MANUAL_HOLD_OPEN` | BTN_CLOSE / web manual | `MOVING_CLOSE` | MANUAL |
-| `MANUAL_HOLD_OPEN` | BTN_OPEN | no-op (already open) | — |
-| `MANUAL_HOLD_CLOSED` | `abs_open` trigger | `MOVING_OPEN` | AUTO |
-| `MANUAL_HOLD_CLOSED` | BTN_OPEN / web manual | `MOVING_OPEN` | MANUAL |
-| `MANUAL_HOLD_CLOSED` | BTN_CLOSE | no-op (already closed) | — |
-| `SAFETY_STOP` | BTN_OPEN | `MOVING_OPEN` | RECOVERY |
-| `SAFETY_STOP` | BTN_CLOSE | `MOVING_CLOSE` | RECOVERY |
-| `ERROR` | POST /api/reboot or hardware reset | restart | — |
-| any state | 3× consecutive I2C `OSError` | `ERROR` | — |
+- Only `_start_move(direction, trigger)` changes the state to `MOVING_*`. It bumps `_move_gen` and spawns exactly one `_run_move(direction, gen)` task.
+- `_run_move` exits silently when `gen != _move_gen`. Older tasks can never overwrite the state.
+- `control_loop` **never** spawns move tasks (phase 4).
+- `_halt(state)`: bumps `_move_gen` (kills running `_run_move`), sets state, drives nSLEEP LOW first (GPIO kill switch, works with dead I2C), then `motor.stop()` best-effort (OSError swallowed).
+- Stop order is the same everywhere (R19): halt, limit stop, timeout, nFAULT, reversal. nSLEEP LOW first, then IN1=IN2=LOW via PCF8574 (best effort). PCF8574 OSError on reversal → ERROR (R36).
+- Reversal (manual opposite direction while moving): **PLANNED (phase 4)** — `_start_move` marks reversal; `_run_move` runs the stop order (R19), waits 200 ms, then drives opposite (nSLEEP HIGH ≥ 1 ms before drive). Current code calls `motor.stop()` in `manual_move` before `_start_move` and has no dead-time (state.py lines 102-103).
 
 ---
 
-## Decision Logic
+## 4. Movement Trigger
 
-`tick()` runs every 2 seconds. All conditions computed from:
-- Current local time (`now`, minutes since midnight)
-- Today's pre-computed schedule: `(wo, wc, ao, ac)` — calculated at startup and midnight
-- Light buffer: 5 most-recent BH1750 readings (updated every 300 ms)
+| Trigger | Set by | On limit reached |
+|---------|--------|------------------|
+| `AUTO` | `tick()` decision (`desired()`), INIT homing | `IDLE_OPEN` / `IDLE_CLOSED` |
+| `MANUAL` | `manual_move(action, source)` from state INIT (R37), IDLE_* / MANUAL_HOLD_* / MOVING_* (reversal) | `MANUAL_HOLD_OPEN` / `MANUAL_HOLD_CLOSED` |
+| `RECOVERY` | `manual_move` from `SAFETY_STOP` (physical button only, decision 1) | `IDLE_OPEN` / `IDLE_CLOSED` |
 
-### Light Buffer
-
-The light sensor loop fills a 5-slot circular buffer. Only after the buffer is full (`lux_ready=True`) can sensor-based decisions fire. This prevents false triggers on startup.
-
-**Unanimity rule:** all 5 samples must agree — a single outlier (cloud, shadow) is insufficient.
-
-### Sensor Conditions
-
-```
-sensor_open  = (wo ≤ now < wc)  AND  all(lux > lux_open  for lux in buffer)
-sensor_close = (now ≥ wc OR now < wo)  AND  all(lux < lux_close for lux in buffer)
-```
-
-- `lux_open` default: **8.0 lx**
-- `lux_close` default: **3.0 lx**
-- Hysteresis (3 lx gap) prevents oscillation near the threshold
-
-### Backstop (Absolute Override) Conditions
-
-```
-abs_open  = (ao ≤ now < wc)      — fires when sensor failed to open within window
-abs_close = (now ≥ ac OR now < wo) — fires when sensor failed to close (lamp, moon, etc.)
-```
-
-Backstop is the **outer boundary** — the sensor operates within. Semantics:
-- `abs_open`: "It's been light enough for `ao−wo` minutes and the sensor still hasn't opened — open it anyway."
-- `abs_close`: "It's definitely night by now — close regardless of sensor reading."
+`_on_limit_reached()`: `MANUAL` → hold state; any other trigger → idle state. Calls `on_event` (R5).
 
 ---
 
-## Configuration Modes
+## 5. Transition Table
 
-### Three Independent Sections
-
-Each section has its own `mode` field and can be configured independently:
-
-**`window` — when is the sensor active?**
-
-| Mode | Behaviour |
-|------|-----------|
-| `sun_position` | `[sunrise_CET + sunrise_offset_min, sunset_CET + sunset_offset_min]` |
-| `legacy` | Fixed hours `[hour_open, hour_close]` (default: 06:00–18:00) |
-
-**`override_open` — backstop open time (abs_open)**
-
-| Mode | Behaviour |
-|------|-----------|
-| `dynamic` | `sunrise_CET + DST + after_sunrise_min` minutes |
-| `fixed` | Fixed hour `fixed_hour` (local time) |
-
-**`override_close` — backstop close time (abs_close)**
-
-| Mode | Behaviour |
-|------|-----------|
-| `fixed` | Fixed hour `fixed_hour` (local time) |
-| `dynamic` | `sunset_CET + DST + after_sunset_min` minutes |
-
-### Config Invariant
-
-```
-window_open_local  ≤  abs_open_local
-abs_open_local     <  abs_close_local
-abs_close_local    ≥  window_close_local
-```
-
-- **Hard validation** on `POST /api/config` — returns 400 with descriptive error if violated.
-- **Soft validation** at runtime (midnight + startup) — clamps and logs a warning; device continues operating.
-
----
-
-## Time System
-
-### CET Storage Rule
-
-The DS3231 always stores **CET (UTC+1)**. The hardware clock is **never adjusted** for daylight saving time.
-
-Why: Changing the RTC for DST would complicate daily record timestamps, astronomical calculations, and midnight detection. The single UTC+1 offset is constant; DST is a UI/logic concern only.
-
-### DST Detection (`is_dst`)
-
-| Condition | Rule |
-|-----------|------|
-| DST start | Last Sunday of March at 02:00 CET |
-| DST end | Last Sunday of October at 02:00 CET |
-| Summer (CEST active) | Add +60 min to CET when computing local time |
-
-`local_minutes(y, m, d, h, minute)` returns minutes since midnight in local time. May exceed 1440 during CEST at CET 23:xx — all comparisons with `wo/wc/ao/ac` handle this correctly.
-
-### Daily Schedule Recalculation
-
-`_resolve_times()` computes `(wo, wc, ao, ac)` for the current day. Called:
-1. At controller startup (if RTC is synced, year ≥ 2020)
-2. Every midnight
-
-Intermediate ticks use cached `_today_times` — no per-tick sun calculation.
+| From | Condition | To | Trigger | Code |
+|------|-----------|----|---------|------|
+| `INIT` | LIMIT_TOP active only (2 consistent reads, R37) | `IDLE_OPEN` | — | `tick` |
+| `INIT` | LIMIT_BOTTOM active only (2 consistent reads, R37) | `IDLE_CLOSED` | — | `tick` |
+| `INIT` | both limits active (2 consistent reads, R37) | `ERROR` | — | `tick` → `_halt` |
+| `INIT` | neither limit, `desired()=="open"` (2 consistent reads, R37) | `MOVING_OPEN` | AUTO | `tick` → `_start_move` |
+| `INIT` | neither limit, otherwise (incl. RTC unsynced; 2 consistent reads, R37) | `MOVING_CLOSE` | AUTO | `tick` → `_start_move` (homing close, R9) |
+| `INIT` | manual open / close (button or web) | `MOVING_OPEN` / `MOVING_CLOSE` | MANUAL | `manual_move` (R37) |
+| `IDLE_CLOSED` | `desired()=="open"` | `MOVING_OPEN` | AUTO | `tick` |
+| `IDLE_OPEN` | `desired()=="closed"` | `MOVING_CLOSE` | AUTO | `tick` |
+| `IDLE_CLOSED` | manual open | `MOVING_OPEN` | MANUAL | `manual_move` |
+| `IDLE_OPEN` | manual close | `MOVING_CLOSE` | MANUAL | `manual_move` |
+| `MOVING_OPEN` | LIMIT_TOP hit, trigger AUTO/RECOVERY | `IDLE_OPEN` | — | `_on_limit_reached` |
+| `MOVING_OPEN` | LIMIT_TOP hit, trigger MANUAL | `MANUAL_HOLD_OPEN` | — | `_on_limit_reached` |
+| `MOVING_OPEN` | timeout (`safety.move_timeout_s`) | `SAFETY_STOP` | — | `tick` or `_run_move` → `_halt` |
+| `MOVING_OPEN` | nFAULT LOW | `SAFETY_STOP` | — | `_run_move` → `_halt` |
+| `MOVING_OPEN` | manual close (reversal) | `MOVING_CLOSE` | MANUAL | `manual_move` (dead-time 200 ms, R19 stop order, phase 4) |
+| `MOVING_CLOSE` | LIMIT_BOTTOM hit, AUTO/RECOVERY | `IDLE_CLOSED` | — | `_on_limit_reached` |
+| `MOVING_CLOSE` | LIMIT_BOTTOM hit, MANUAL | `MANUAL_HOLD_CLOSED` | — | `_on_limit_reached` |
+| `MOVING_CLOSE` | timeout / nFAULT LOW | `SAFETY_STOP` | — | as above |
+| `MOVING_CLOSE` | manual open (reversal) | `MOVING_OPEN` | MANUAL | `manual_move` (dead-time 200 ms, R19 stop order, phase 4) |
+| `MOVING_*` | same-direction manual | no-op (returns False; web 200) | — | `manual_move` |
+| `MANUAL_HOLD_OPEN` | `desired()` != `_hold_desired` | `IDLE_OPEN`, then `MOVING_CLOSE` in same tick if `desired()=="closed"` | AUTO | `tick` |
+| `MANUAL_HOLD_CLOSED` | `desired()` != `_hold_desired` | `IDLE_CLOSED`, then `MOVING_OPEN` if `desired()=="open"` | AUTO | `tick` |
+| `MANUAL_HOLD_OPEN` | manual close | `MOVING_CLOSE` | MANUAL | `manual_move` |
+| `MANUAL_HOLD_CLOSED` | manual open | `MOVING_OPEN` | MANUAL | `manual_move` |
+| `MANUAL_HOLD_*` | same-direction manual | no-op (returns False; web 200) | — | `manual_move` |
+| `SAFETY_STOP` | open button (source=button) | `MOVING_OPEN` | RECOVERY | `manual_move` |
+| `SAFETY_STOP` | close button (source=button) | `MOVING_CLOSE` | RECOVERY | `manual_move` |
+| `SAFETY_STOP` | any manual with source=web | refused (returns False; web route → HTTP 409, R1) | — | `manual_move` (decision 1) |
+| `SAFETY_STOP` | `tick()` | no move; `_read_clock` only (day change, `rtc_synced`, `_last_local`, R30) | — | `tick` |
+| `SAFETY_STOP` | AP session start (both buttons 3 s) | AP runs, state unchanged (R23) | — | `ap_session` |
+| `ERROR` | any manual, any tick | no move (reboot only); tick still runs `_read_clock` (R30) | — | `manual_move`, `tick` |
+| any | 3 consecutive I2C `OSError` | `ERROR` | — | `_i2c_call` → `_halt` |
+| any | DS3231 missing at boot (`boot_ok` False) | `ERROR` | — | `main` → `enter_error()` (R12, R18) |
+| `MOVING_*` | `OSError` on PCF8574 motor write at start or reversal (`stop` / drive, R36) | `ERROR` | — | `_run_move` → `_halt` |
 
 ---
 
-## Astronomical Approximation
+## 6. Decision Logic
 
-Location: **Tarnów, Poland (~50°N, 21°E)**.  
-Accuracy: **±15 minutes** — sufficient for dawn/dusk detection.
+`tick()` runs every 2 s from `control_loop`. Synchronous, no asyncio, no I/O beyond RTC/limit reads.
 
-Cosine model anchored at solstices (CET, no DST):
+Order inside `tick()`:
+1. `MOVING_*` → only timeout backstop check; return.
+2. `SAFETY_STOP` / `ERROR` → `_read_clock()` only (day-change hook, `rtc_synced`, `_last_local`; R30), then return. Never moves.
+3. `INIT` → limit read, 2 consistent reads for all four outcomes (decision 12, R37); both limits → `ERROR`; one limit → idle state; neither → homing (step 6).
+4. `_read_clock()` → `(synced, now)` or None on I2C failure (return).
+5. `want = desired(now) if synced else None`.
+6. `INIT` still → homing `_start_move("open" if want=="open" else "close", AUTO)`; return (R9: close homing also when unsynced).
+7. Hold expiry: `MANUAL_HOLD_*` and `want is not None` and `want != _hold_desired` → idle state.
+8. `IDLE_CLOSED` and `want=="open"` → `MOVING_OPEN` AUTO. `IDLE_OPEN` and `want=="closed"` → `MOVING_CLOSE` AUTO.
 
-| Solstice | DOY | Sunrise (min) | Sunset (min) |
-|----------|-----|--------------|-------------|
-| Summer (21 Jun) | 172 | 206 (03:26) | 1193 (19:53) |
-| Winter (21 Dec) | 355 | 453 (07:33) | 943 (15:43) |
+### Schedule
 
-Derived constants:
-- Rise mean: 329.5 min, amplitude: 123.5 min  
-- Set mean: 1068.0 min, amplitude: 125.0 min
+- `today_schedule = (open_min, close_min)` local minutes, refreshed in `_read_clock` when local date changes.
+- Open = sunrise(−0.833°) + `schedule.open_after_sunrise_min`. Close = civil dusk(−6°) + `schedule.close_after_dusk_min`. NOAA formula, ±2 min (`src/astro.py`).
+- `desired(now)`: None if `today_schedule` None (unsynced) or `open >= close`; else `"open"` if `open <= now < close`, else `"closed"`.
+- `config_warning = "open >= close: no auto moves today"` when `open >= close`.
 
-Formula: `rise = RISE_MEAN − RISE_AMP × cos(2π × (doy − 172) / 365)`
+### Hold ("manual hold until next scheduled change")
+
+- `manual_move` stores `_hold_desired = desired(now)`.
+- Hold ends when `desired(now)` differs from `_hold_desired` (schedule boundary crossed).
+- While RTC unsynced or on a no-auto day, `want` is None → hold does not expire.
+- First valid `want` that differs from `_hold_desired` expires the hold, including when `_hold_desired` is None (hold set while unsynced). Intended (R38, supersedes R9 wording).
+
+### Time
+
+- DS3231 stores CET (UTC+1), never adjusted for DST. DST offset applied in logic layer only (`local_minutes`).
+- `local_minutes(...)` may return ≥1440 during CEST for CET 23:xx. `_read_clock` subtracts 1440 and advances the date (state.py lines 157-159).
+- RTC unsynced (year < 2020) → `today_schedule=None`, `_date=None`, `(False, 0)` returned. No auto moves.
+- OSF (R17, R32): `_read_clock` reads `rtc.osf()` via `_i2c_call`. OSF=1 → treated as unsynced. `RTC.datetime()` returns the true time (no 1999 trick). `set_datetime` clears OSF and forces 24 h mode (phase 8). `rtc_synced` starts None (R31); `status_json` uses the cached value, no extra RTC read (R32).
+- Day change (R4, R5, R30): `_read_clock` calls `on_day_change(prev, new)` when `_last_local` is set and the local date changes; `prev = _last_local[:3]` (not `_date`). Also runs in SAFETY_STOP / ERROR. Hooks wrapped in try/except (R29). main binds the hook to `logs.flush()` (06). state.py never imports logs.
 
 ---
 
-## Async Architecture
+## 7. Manual Move
 
-All logic runs in a single-threaded `uasyncio` event loop. No `time.sleep()` anywhere:
+Signature (R1, phase 4): `manual_move(action: str, source: str) -> bool`, `source` in `{"button", "web"}`, no default. Every caller passes source.
+
+| State | source=button | source=web |
+|-------|---------------|------------|
+| `ERROR` | refused (False) | refused → HTTP 409 |
+| `SAFETY_STOP` | `RECOVERY` move | refused → HTTP 409 `{"error":"SAFETY_STOP: clear with physical button at the coop"}` |
+| `INIT` | `MANUAL` move (R37) | `MANUAL` move → HTTP 200 (R37) |
+| `IDLE_*`, `MANUAL_HOLD_*` | `MANUAL` move | `MANUAL` move → HTTP 200 |
+| `MOVING_*` same direction | no-op (False) | no-op → HTTP 200 |
+| `MOVING_*` opposite | reversal (dead-time 200 ms, R19 stop order) | reversal → HTTP 200 |
+
+- Web ignores the bool (R1). The web route checks `ctrl.state`: `SAFETY_STOP` / `ERROR` → 409, else 200.
+- Current code (state.py lines 89-105): `SAFETY_STOP` → `RECOVERY` for any source (violates decision 1); returns None; calls `motor.stop()` before `_start_move` (no dead-time).
+
+---
+
+## 8. INIT Homing and Glitch Protection
+
+- Decision 12 (phase 4): limit switches read in INIT must agree on 2 consecutive ticks (≈ 2 s) before any decision, for all four outcomes: top, bottom, both, neither (R37). One-tick glitch → no decision.
+- Manual move from INIT is accepted (MANUAL trigger, R37). It leaves INIT and is not a limit decision. Document and test.
+- R9: INIT with neither limit and RTC unsynced → homing close allowed (no clock needed).
+- Current code decides on one read.
+
+---
+
+## 9. LED Table
+
+Half-period = 1 / (2 × frequency). 1 Hz → 500 ms toggle. 4 Hz → 125 ms toggle (period 250 ms).
+
+| Condition | Green | Red | Yellow |
+|-----------|-------|-----|--------|
+| `INIT` | off | off | off (R23) |
+| `IDLE_OPEN`, `MANUAL_HOLD_OPEN` | solid | off | overlay |
+| `IDLE_CLOSED`, `MANUAL_HOLD_CLOSED` | off | solid | overlay |
+| `MOVING_OPEN`, `MOVING_CLOSE` | 1 Hz | off | overlay |
+| `SAFETY_STOP` | off | 1 Hz | overlay |
+| `ERROR` (incl. DS3231 missing at boot, R18) | off | 4 Hz | overlay |
+| RTC unsynced or OSF=1 (not in INIT, R23) | — | — | 1 Hz, any state except INIT |
+
+Yellow = "RTC not synced / OSF" (decision 7, R17). VBAT overlay removed (VBAT ADC removed).
+
+---
+
+## 10. Async Architecture (phase 4)
 
 | Task | Period | Role |
 |------|--------|------|
-| `light_sensor_loop` | 300 ms per sample | Fill 5-slot lux buffer via BH1750 |
-| `control_loop` | 2 s | Call `tick()`, spawn `_run_move` on state transitions, check VBAT |
-| `led_loop` | 500 ms (125 ms in ERROR) | Update LED outputs per current state |
-| `button_monitor` × 2 | 20 ms poll | Debounce + multi-click detection |
-| `_run_move` | 20 ms poll | Motor movement, limit polling, nFAULT check |
-| `_ap_watchdog` | 60 s | Shut down WiFi AP after 10 min idle |
+| `control_loop` (04 §11) | 2 s | feed WDT, `tick()`; auto-AP once per boot when `rtc_synced` is explicit False (R8) or boot ends in ERROR (R31); lightsleep deferred (R25); never spawns moves |
+| `_run_move` | 20 ms poll | created by `_start_move` only; limit poll, nFAULT, timeout |
+| `led_task` | 500 ms (125 ms in ERROR) | outputs per table section 9 |
+| `button_task(ctrl, pin, other, action, ap)` × 2 | 20 ms poll, 50 ms debounce | release action < 1 s; both held 3 s → set `ap_request` (decision 2, R7, R26) |
+| `ap_session` (phase 4, 04 §11) | long-lived, polls `ap_request` 500 ms; flags are module globals in main.py (R26) | WiFi AP + web server; open AP if `ap_password` empty (R6); idle timeout 10 min; CPU stays fixed 80 MHz (no freq switch); teardown in `finally` (decision 3). Auto AP at boot (R8) |
 
-`tick()` is **synchronous** — pure Python logic, no I/O, fully testable on CPython with mock objects.
+`tick()` is synchronous and testable on CPython with mocks.
+
+### Lightsleep rule (decision 10, R14, R15)
+
+Deferred (R25): lightsleep stays OFF until V3 + V4 (V-wake, 08) pass on device. Gate (`_can_lightsleep`, 04 §11): state in `IDLE_OPEN`, `IDLE_CLOSED`, `MANUAL_HOLD_OPEN`, `MANUAL_HOLD_CLOSED`; RTC synced; `not ap_request`; both buttons released; `await asyncio.sleep(0)` after each sleep. Never in `INIT`, `MOVING_*`, `SAFETY_STOP`, `ERROR` (LED blinks need the CPU). Wake on EITHER button is BLOCKING VERIFY (R15). Fallback if no either-button wake API: lightsleep stays disabled.
 
 ---
 
-## Multi-Click Button Logic
+## 11. Halt and Error Paths
 
-| Clicks (within 500 ms) | BTN_OPEN | BTN_CLOSE |
-|------------------------|----------|-----------|
-| 1× | `manual_move('open')` | `manual_move('close')` |
-| ≥2× | Start WiFi AP + web server | Start WiFi AP + web server |
+| Cause | Result |
+|-------|--------|
+| Timeout > `safety.move_timeout_s` (default in config) | `SAFETY_STOP` |
+| nFAULT LOW | `SAFETY_STOP` |
+| 3 consecutive `OSError` in `_i2c_call` | `ERROR` |
+| `OSError` on motor write at move start or reversal (R36) | `ERROR` |
+| both limits active at INIT | `ERROR` |
+| DS3231 or PCF8574 missing at boot (main I2C scan, R40) | `ERROR` via `enter_error()` (R12, R18), LED red 4 Hz; auto AP (R31) |
 
-Debounce: 50 ms. Click window: 500 ms.
+- Halts go through `_halt` (or `enter_error()` at boot, R12). `main` never calls `_halt`.
+- Every halt and limit stop runs the stop order: nSLEEP LOW first, then IN1=IN2=LOW (R19).
+- Every halt calls `on_event(kind, trigger)` (R5). `error` fires once: only on transition into ERROR (R29), trigger AUTO. Hooks in try/except (never kill tick). Flush on ERROR entry (R29).
+- `ERROR` clears only on reboot. `SAFETY_STOP` clears only via physical button (RECOVERY move). AP does not clear either (R23).
+
+---
+
+## 12. Open Items (discrepancies between code and decisions)
+
+Closed by round-2 R-rules:
+- **A.** `tick()` INIT with neither limit and RTC unsynced → `_start_move("close", AUTO)`. CLOSED by R9: homing close allowed without clock.
+- **B.** Hold while unsynced / no-auto day. CLOSED by R9 + R38: does not expire while `want` is None; first valid `want` expires it (incl. `_hold_desired` None).
+- **I.** INIT manual move edge. CLOSED by R37: allowed, MANUAL trigger, documented and tested.
+- **J.** Repeated ERROR events per tick. CLOSED by R29: ERROR logged once per transition.
+- **G.** INIT LED pattern. CLOSED by R23: all LEDs off in INIT.
+- **H.** Long button press (≥ 1 s) on a single button: no action. CLOSED by R7.
+
+Decided, code change pending (phase 4 implements; no open decision):
+- **C.** `manual_move` accepts `SAFETY_STOP` from web (state.py line 104). Decided by R1 (web refused, 409). Code fix phase 4.
+- **D.** No reversal dead-time (state.py lines 102-103). Decided by decision 11 and R19 (stop order). Code fix phase 4.
+- **E.** INIT decides on single read. Decided by decision 12. Code fix phase 4.
+- **F.** `rtc_synced` = `year >= 2020` only; OSF not read. Decided by R17. Code fix phase 4 / phase 8.
+
+VERIFY ON DEVICE items: see `docs/phases/04-async-tasks.md` section "VERIFY ON DEVICE".

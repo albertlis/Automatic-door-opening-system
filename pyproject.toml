@@ -3,8 +3,7 @@ name = "smart-coop-v2"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
-    "microdot[asyncio]>=2.0.6",
-    "pyright>=1.1.409",
+    "microdot>=2.0.6",
 ]
 
 [project.optional-dependencies]
@@ -12,12 +11,13 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.4",
+    "pyright>=1.1.409",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = ["src", "."]
 
 [tool.ruff]
 target-version = "py313"
@@ -25,3 +25,4 @@ line-length = 120
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["SIM105"]  # contextlib.suppress unavailable on MicroPython

@@ -1,3 +1,6 @@
+// Main application sketch. Excluded from unit test builds so that
+// test sources can provide their own setup()/loop() without conflicts.
+#ifndef UNIT_TEST
 #include <Arduino.h>
 #include "switches.hpp"
 #include "objects.hpp"
@@ -53,6 +56,8 @@ void setup() {
         // isSummerTime = true;
 
     setupLightSensor();
+    // Start first non-blocking light sampling cycle
+    startLightSampling();
 
     readGatePosition();
     setupEEPROM();
@@ -69,12 +74,17 @@ void setup() {
  *                  Loop
  ***************************************************************/
 void loop() {
+    // Handle debounced edge events outside ISR
+    handleOpeningEdge();
+    handleClosingEdge();
+    // Continuous sampling independent of checkDelay window
+    processLightSampling();
     if (millis() - millisNow > checkDelay) {
         millisNow = millis();
         date = RTC.now();
 
         if(date.hour() == 0 && date.minute() == 0 && compensateRtcDriftSwitch == true) {
-            compensateRtcDrift();
+            compensateRtcDrift(); // start non-blocking drift
             compensateRtcDriftSwitch = false;
             gate.isCloseButtonClicked = false;
             gate.isOpenButtonClicked = false;
@@ -82,21 +92,36 @@ void loop() {
         else if (date.hour() != 0)
             compensateRtcDriftSwitch = true;
 
+        processRtcDrift();
+
         // switchSummerWinterTime();
 
-        readLight();
+        bool lightReady = isLightSamplingFinished();
         
         #ifdef PRINT
         printInfo();
         #endif
-        if (gate.shouldClose() && (!gate.isClosed)) {
+    bool wantClose = false;
+    bool wantOpen  = false;
+        if(lightReady) {
+            wantClose = GateLogic::shouldClose() && (!gate.isClosed);
+            wantOpen  = GateLogic::shouldOpen()  && (!gate.isOpened);
+        }
+        // Prevent conflicting decisions in the same cycle
+        if (wantClose && wantOpen) {
+            // Give priority: safety -> absolute -> skip (here just skip both)
+            wantClose = true;
+            wantOpen = false;
+        }
+
+        if (wantClose) {
             if ((!(gate.isOpening || gate.isClosing)) && (!gate.isSafetyStop)) {
                 if(!gate.isOpenButtonClicked) {
                     gate.closeGate();
                 }
             }
         }
-        if (gate.shouldOpen() && (!gate.isOpened)) {
+        if (wantOpen) {
             if ((!(gate.isOpening || gate.isClosing)) && (!gate.isSafetyStop)) {
                 if(!gate.isCloseButtonClicked) {
                     gate.openGate();
@@ -104,7 +129,18 @@ void loop() {
             }
         }
        
-        if (gate.shouldAbsoluteClose() && (!gate.isClosed)) {
+    bool wantAbsClose = false;
+    bool wantAbsOpen  = false;
+        if(lightReady) {
+            wantAbsClose = GateLogic::shouldAbsoluteClose() && (!gate.isClosed);
+            wantAbsOpen  = GateLogic::shouldAbsoluteOpen()  && (!gate.isOpened);
+        }
+        if (wantAbsClose && wantAbsOpen) {
+            // If both absolute states conflict (edge hour), ignore to avoid oscillation
+            wantAbsClose = false;
+            wantAbsOpen = false;
+        }
+        if (wantAbsClose) {
             if ((!(gate.isOpening || gate.isClosing)) && (!gate.isSafetyStop)) {
                 if(!gate.isOpenButtonClicked) {
                     gate.closeGate();
@@ -112,7 +148,7 @@ void loop() {
                 }
             }
         }
-        if (gate.shouldAbsoluteOpen() && (!gate.isOpened)) {
+        if (wantAbsOpen) {
             if ((!(gate.isOpening || gate.isClosing)) && (!gate.isSafetyStop)) {
                 if(!gate.isCloseButtonClicked) {
                     gate.openGate();
@@ -122,6 +158,10 @@ void loop() {
         }
 
         ledYellow.shouldBlink = (checkBatteryVoltage() < batteryDischargeVoltage) ? true : false;
+        // Start next sampling cycle after using the completed buffer
+        if(lightReady) {
+            startLightSampling();
+        }
     }
     if ((gate.isOpening || gate.isClosing) && (millis() - gate.startMovingTime > maxMovingTime))
         gate.safetyStop();
@@ -159,9 +199,11 @@ void loop() {
     // delay(2000);
     // wdt_reset();
     #ifdef LOG_LIGHT
-    if (millis() - millisNow > logLightInterval) {
-        logLightInfo();
-        writeLightLogIntoEeprom();
+    if (millis() - lastLightLogMillis > logLightInterval) {
+        lastLightLogMillis = millis();
+        startLightLogging();
     }
+    processLightLogging();
     #endif
 }
+#endif // UNIT_TEST

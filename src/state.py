@@ -1,8 +1,13 @@
 # Licensed under CC BY-NC-SA 4.0. Strictly non-commercial.
-from enum import Enum
+import asyncio
+import json
+
+from astro import local_minutes, next_day
+from compat import sleep_ms, ticks_diff, ticks_ms
+from config import schedule
 
 
-class GateState(Enum):
+class GateState:
     INIT = "INIT"
     IDLE_OPEN = "IDLE_OPEN"
     IDLE_CLOSED = "IDLE_CLOSED"
@@ -14,324 +19,276 @@ class GateState(Enum):
     ERROR = "ERROR"
 
 
-class MovementTrigger(Enum):
+class MovementTrigger:
     AUTO = 0
     MANUAL = 1
     RECOVERY = 2
 
 
-# ---------------------------------------------------------------------------
-# Date arithmetic helpers (MicroPython-safe, no time.mktime)
-# ---------------------------------------------------------------------------
-
-_MONTH_DAYS = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-
-
-def _is_leap(y: int) -> bool:
-    return y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)
-
-
-def _next_day(y: int, m: int, d: int) -> tuple[int, int, int]:
-    d += 1
-    dim = 29 if m == 2 and _is_leap(y) else _MONTH_DAYS[m]
-    if d > dim:
-        d = 1
-        m += 1
-        if m > 12:
-            m = 1
-            y += 1
-    return y, m, d
-
-
-# ---------------------------------------------------------------------------
-# CoopController
-# ---------------------------------------------------------------------------
+REVERSAL_DEAD_MS = 200  # coast before driving the opposite way (decision 11)
 
 
 class CoopController:
-    def __init__(
-        self,
-        motor,
-        rtc,
-        light_sensor,
-        pcf,
-        limit_top,
-        limit_bottom,
-        btn_open,
-        btn_close,
-        leds,  # tuple: (led_red, led_yellow, led_green)
-        nsleep,  # DRV8833 nSLEEP pin
-        nfault,  # DRV8833 nFAULT pin
-        config,
-    ):
+    def __init__(self, motor, rtc, limit_top, limit_bottom, nsleep, nfault, config: dict):
         self.motor = motor
         self.rtc = rtc
-        self.light = light_sensor
-        self.pcf = pcf
-        self.limit_top = limit_top
-        self.limit_bottom = limit_bottom
-        self.btn_open = btn_open
-        self.btn_close = btn_close
-        self.leds = leds
-        self.nsleep = nsleep
-        self.nfault = nfault
+        self.limit_top = limit_top  # active-low: 0 = at top
+        self.limit_bottom = limit_bottom  # active-low: 0 = at bottom
+        self.nsleep = nsleep  # DRV8833 nSLEEP
+        self.nfault = nfault  # DRV8833 nFAULT, active-low
         self.config = config
+        self.state = GateState.INIT
+        self.today_schedule: tuple[int, int] | None = None  # (open_min, close_min) local, None if unsynced
+        self.config_warning = ""
+        self.rtc_synced: bool | None = None  # None = never read, True/False from last successful read (R31)
+        self._date: tuple[int, int, int] | None = None  # local date today_schedule belongs to
+        self._last_local: tuple[int, int, int, int] | None = None  # (y, m, d, local minute), None if unsynced
+        self._trigger = MovementTrigger.AUTO
+        self._move_start_ms = 0
+        self._move_gen = 0  # bumped per _start_move / _halt; older _run_move tasks see mismatch and exit
+        self._hold_desired: str | None = None  # desired() at manual_move time; hold expires when it changes
+        self._i2c_fail_count = 0
+        self._init_sample: tuple[bool, bool] | None = None  # INIT: last (top, bottom) read (R37)
 
-        self.state: GateState = GateState.INIT
-        self._trigger: MovementTrigger = MovementTrigger.AUTO
-        self._move_start_ms: int = 0
-        self._abort_move: bool = False
-        self._i2c_fail_count: int = 0
-        self._vbat_low: bool = False
-        self._vbat_v: float | None = None
-        self._config_warning: str = ""
-        self._today_times: tuple = (0, 0, 0, 0)  # (wo, wc, ao, ac) min from midnight
+    # Hooks: main.py assigns instance attributes. Defaults are no-ops (R4, R5, R29).
+    def on_event(self, kind: str, trigger: int) -> None:
+        pass
 
-        # Daily record [days_since_2025, open_min, close_min, manual_count, error_count]
-        self._today_rec: list = [0, 0xFFFF, 0xFFFF, 0, 0]
-        self._today_rec_error_count: int = 0
+    def on_day_change(self, prev: tuple, new: tuple) -> None:
+        pass
 
-        # Shared lux buffer (populated by light_sensor_loop in Phase 4)
-        self.lux_buffer: list[float] = [0.0] * 5
-        self.lux_ready: bool = False
+    def _emit(self, kind: str, trigger: int) -> None:
+        try:
+            self.on_event(kind, trigger)
+        except Exception as e:
+            print("on_event:", e)
 
-        y, mo, d, h, minute, *_ = self.rtc.datetime()
-        if y >= 2020:
-            self._resolve_times(y, mo, d, h, minute)
-            from src.logs import days_since_2025
-
-            self._today_rec[0] = days_since_2025(y, mo, d)
+    def _emit_day(self, prev: tuple, new: tuple) -> None:
+        try:
+            self.on_day_change(prev, new)
+        except Exception as e:
+            print("on_day_change:", e)
 
     # ------------------------------------------------------------------
-    # Core sync tick — called every 2s by control_loop (Phase 4)
+    # Sync tick, every 2 s. No asyncio in here.
     # ------------------------------------------------------------------
 
     def tick(self) -> None:
-        from src.compat import ticks_diff, ticks_ms
-
         if self.state in (GateState.MOVING_OPEN, GateState.MOVING_CLOSE):
-            elapsed = ticks_diff(ticks_ms(), self._move_start_ms)
-            if elapsed > self.config.safety.move_timeout_s * 1000:
-                self._safety_stop()
+            if self._timed_out():  # backstop in case _run_move task died
+                self._halt(GateState.SAFETY_STOP)
             return
-
-        result = self._i2c_call(self.rtc.datetime)
-        if result is None:
-            return  # I2C failed, already transitioned to ERROR
-        y, mo, d, h, minute, *_ = result
-
-        wo, wc, ao, ac = self._today_times
-
-        from src.astro import local_minutes
-
-        now = local_minutes(y, mo, d, h, minute)
-
-        lux_ok = self.lux_ready
-        all_lux_high = lux_ok and all(v > self.config.light.lux_open for v in self.lux_buffer)
-        all_lux_low = lux_ok and all(v < self.config.light.lux_close for v in self.lux_buffer)
-
-        sensor_open = (wo <= now < wc) and all_lux_high
-        sensor_close = (now >= wc or now < wo) and all_lux_low
-        abs_open = ao <= now < wc  # backstop fires inside sensor window
-        abs_close = now >= ac or now < wo  # backstop fires in night zone
-
-        if self.state == GateState.IDLE_CLOSED:
-            if sensor_open or abs_open:
-                self._trigger = MovementTrigger.AUTO
-                self.state = GateState.MOVING_OPEN
-
-        elif self.state == GateState.IDLE_OPEN:
-            if sensor_close or abs_close:
-                self._trigger = MovementTrigger.AUTO
-                self.state = GateState.MOVING_CLOSE
-
-        elif self.state == GateState.MANUAL_HOLD_OPEN:
-            if abs_close:
-                self._trigger = MovementTrigger.AUTO
-                self.state = GateState.MOVING_CLOSE
-
-        elif self.state == GateState.MANUAL_HOLD_CLOSED:
-            if abs_open:
-                self._trigger = MovementTrigger.AUTO
-                self.state = GateState.MOVING_OPEN
-
-        elif self.state == GateState.INIT:
-            self._handle_init()
-
-        # SAFETY_STOP / ERROR: no-op — only reboot or manual_move escapes these
-
-    def _handle_init(self) -> None:
-        top = self.limit_top.value() == 0
-        bottom = self.limit_bottom.value() == 0
-
-        if top and bottom:
-            self._enter_error()
+        if self.state in (GateState.SAFETY_STOP, GateState.ERROR):
+            self._read_clock()  # keeps rtc_synced, _last_local, day change current (R30); never moves
             return
-        if top:
-            self.state = GateState.IDLE_OPEN
+        if self.state == GateState.INIT:
+            top = self.limit_top.value() == 0
+            bottom = self.limit_bottom.value() == 0
+            sample = (top, bottom)
+            if sample != self._init_sample:  # first read, or reads disagree: no decision yet (R37)
+                self._init_sample = sample
+                return
+            if top and bottom:
+                self._halt(GateState.ERROR)
+                return
+            if top:
+                self.state = GateState.IDLE_OPEN
+            elif bottom:
+                self.state = GateState.IDLE_CLOSED
+        clock = self._read_clock()
+        if clock is None:
+            return  # I2C failure (ERROR after 3rd in a row)
+        synced, now = clock
+        want = self.desired(now) if synced else None
+        if self.state == GateState.INIT:  # neither limit: home toward desired; unknown -> close
+            self._start_move("open" if want == "open" else "close", MovementTrigger.AUTO)
             return
-        if bottom:
-            self.state = GateState.IDLE_CLOSED
-            return
-        # Both inactive: decide direction by time
-        self._trigger = MovementTrigger.AUTO
-        self.state = GateState.MOVING_OPEN if self.is_daytime() else GateState.MOVING_CLOSE
+        holding = self.state in (GateState.MANUAL_HOLD_OPEN, GateState.MANUAL_HOLD_CLOSED)
+        if holding and want is not None and self._hold_desired == "?":  # press-time clock read failed: adopt now
+            self._hold_desired = want
+        if holding and want is not None and want != self._hold_desired:  # schedule moved on -> hold expires
+            opening = self.state == GateState.MANUAL_HOLD_OPEN
+            self.state = GateState.IDLE_OPEN if opening else GateState.IDLE_CLOSED
+        if self.state == GateState.IDLE_CLOSED and want == "open":
+            self._start_move("open", MovementTrigger.AUTO)
+        elif self.state == GateState.IDLE_OPEN and want == "closed":
+            self._start_move("close", MovementTrigger.AUTO)
 
     # ------------------------------------------------------------------
-    # Public helpers
+    # Public API
     # ------------------------------------------------------------------
 
-    def is_daytime(self) -> bool:
-        from src.astro import local_minutes
+    def enter_error(self) -> None:
+        """Public ERROR entry for main.py (R12). Never _halt from main."""
+        self._halt(GateState.ERROR)
 
-        y, mo, d, h, minute, *_ = self.rtc.datetime()
-        wo, wc, *_ = self._today_times
-        now = local_minutes(y, mo, d, h, minute)
-        return wo <= now < wc
+    def manual_move(self, action: str, source: str) -> bool:
+        """Button or web. True = move started or reversal accepted. Web ignores the bool (R1)."""
+        if action not in ("open", "close") or source not in ("button", "web"):
+            raise ValueError("manual_move: action open|close, source button|web")
+        s = self.state
+        if s == GateState.ERROR:
+            return False
+        if source == "web" and s == GateState.SAFETY_STOP:
+            return False  # SAFETY_STOP cleared by physical button only (decision 1)
+        if action == "open" and s in (GateState.IDLE_OPEN, GateState.MANUAL_HOLD_OPEN, GateState.MOVING_OPEN):
+            return False
+        if action == "close" and s in (GateState.IDLE_CLOSED, GateState.MANUAL_HOLD_CLOSED, GateState.MOVING_CLOSE):
+            return False
+        clock = self._read_clock()
+        if self.state == GateState.ERROR:  # I2C may have errored us
+            return False
+        # "?" = I2C glitch at press time (unknown, adopt on next good read); None = unsynced/no-auto (R38)
+        self._hold_desired = self.desired(clock[1]) if clock else "?"
+        trigger = MovementTrigger.RECOVERY if s == GateState.SAFETY_STOP else MovementTrigger.MANUAL
+        reverse = s in (GateState.MOVING_OPEN, GateState.MOVING_CLOSE)
+        self._start_move("open" if action == "open" else "close", trigger, reverse)
+        return True
 
-    def manual_move(self, action: str) -> None:
-        """Highest priority. Works from any non-ERROR state. Interrupts opposite movement."""
-        if self.state == GateState.ERROR:
-            return  # only reboot escapes ERROR
+    def desired(self, now: int) -> str | None:
+        """'open' | 'closed' for local minute `now`. None if unsynced or open >= close today (no auto)."""
+        if self.today_schedule is None:
+            return None
+        o, c = self.today_schedule
+        if o >= c:
+            return None
+        return "open" if o <= now < c else "closed"
 
-        if action == "open" and self.state in (
-            GateState.IDLE_OPEN,
-            GateState.MANUAL_HOLD_OPEN,
-            GateState.MOVING_OPEN,
-        ):
-            return
-        if action == "close" and self.state in (
-            GateState.IDLE_CLOSED,
-            GateState.MANUAL_HOLD_CLOSED,
-            GateState.MOVING_CLOSE,
-        ):
-            return
-
-        if self.state in (GateState.MOVING_OPEN, GateState.MOVING_CLOSE):
-            self._abort_move = True  # _run_move detects this and clears it (Phase 4)
-            self.motor.stop()
-            self.nsleep.value(0)
-
-        import contextlib
-
-        is_recovery = self.state == GateState.SAFETY_STOP
-        self._trigger = MovementTrigger.RECOVERY if is_recovery else MovementTrigger.MANUAL
-        self.state = GateState.MOVING_OPEN if action == "open" else GateState.MOVING_CLOSE
-        self._today_rec[3] += 1  # manual_count
-
-        import asyncio
-
-        with contextlib.suppress(RuntimeError):  # no running event loop in test context
-            asyncio.get_running_loop().create_task(self._run_move(action))
-
-    def simulate_timeout(self) -> None:
-        """Test hook — moves _move_start_ms past timeout boundary."""
-        from src.compat import ticks_ms
-
-        self._move_start_ms = ticks_ms() - (self.config.safety.move_timeout_s * 1000 + 1)
-
-    def get_forecast(self, days: int = 30) -> list[tuple]:
-        """Return [(wo, wc, ao, ac), ...] for next N days. Used by SVG chart (Phase 5)."""
-        from src.astro import is_dst, sun_times_cet
-        from src.config import (
-            abs_close_local,
-            abs_open_local,
-            window_close_local,
-            window_open_local,
-        )
-
-        result = []
-        y, mo, d, *_ = self.rtc.datetime()
+    def forecast(self, days: int = 30) -> list[tuple[int, int]]:
+        r = self._i2c_call(self.rtc.datetime)
+        if r is None or r[0] < 2020 or self._i2c_call(self.rtc.osf) is not False:
+            return []  # unsynced, OSF=1 (time untrusted) or I2C failure
+        y, mo, d = r[0], r[1], r[2]
+        out = []
         for _ in range(days):
-            rise, sset = sun_times_cet(y, mo, d)
-            dst = 60 if is_dst(y, mo, d, 12) else 0
-            wo = window_open_local(self.config, rise, dst)
-            wc = window_close_local(self.config, sset, dst)
-            ao = abs_open_local(self.config, rise, dst)
-            ac = abs_close_local(self.config, sset, dst)
-            ao = max(ao, wo)
-            ac = max(ac, wc)
-            result.append((wo, wc, ao, ac))
-            y, mo, d = _next_day(y, mo, d)
-        return result
-
-    def get_sun_forecast(self, days: int = 30) -> list[tuple]:
-        """Return [(rise_local_min, set_local_min), ...] for next N days."""
-        from src.astro import is_dst, sun_times_cet
-
-        result = []
-        y, mo, d, *_ = self.rtc.datetime()
-        for _ in range(days):
-            rise, sset = sun_times_cet(y, mo, d)
-            dst = 60 if is_dst(y, mo, d, 12) else 0
-            result.append((rise + dst, sset + dst))
-            y, mo, d = _next_day(y, mo, d)
-        return result
+            out.append(schedule(self.config, y, mo, d))
+            y, mo, d = next_day(y, mo, d)
+        return out
 
     def status_json(self) -> str:
-        import json
-
-        y, mo, d, h, minute, *_ = self.rtc.datetime()
-        wo, wc, ao, ac = self._today_times
-        sun = self.get_sun_forecast(1)
-        rise_today, set_today = sun[0] if sun else (None, None)
+        """Cached values only, no RTC I/O (R32)."""
+        ll = self._last_local
+        sch = self.today_schedule
         return json.dumps(
             {
-                "state": self.state.value,
-                "lux": self.lux_buffer,
-                "time": f"{h:02d}:{minute:02d}",
+                "state": self.state,
+                "time": None if ll is None else f"{ll[3] // 60:02d}:{ll[3] % 60:02d}",
                 "limit_top": self.limit_top.value() == 0,
                 "limit_bottom": self.limit_bottom.value() == 0,
-                "vbat_v": None,  # Phase 8 wires real ADC
-                "config_warning": self._config_warning,
-                "today_schedule": {"wo": wo, "wc": wc, "ao": ao, "ac": ac},
-                "sunrise_today": rise_today,
-                "sunset_today": set_today,
+                "config_warning": self.config_warning,
+                "today_schedule": None if sch is None else {"open": sch[0], "close": sch[1]},
+                "rtc_synced": self.rtc_synced is True,
             }
         )
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Internals
     # ------------------------------------------------------------------
 
-    def _resolve_times(self, y: int, m: int, d: int, h: int, minute: int) -> None:
-        """Compute (wo, wc, ao, ac) for today. Soft-clamp if invariant violated."""
-        from src.astro import is_dst, sun_times_cet
-        from src.config import (
-            abs_close_local,
-            abs_open_local,
-            window_close_local,
-            window_open_local,
-        )
+    def _read_clock(self) -> tuple[bool, int] | None:
+        """(synced, local_now_min); None on I2C failure. Updates rtc_synced, _last_local, schedule, day hook."""
+        r = self._i2c_call(self.rtc.datetime)
+        if r is None:
+            return None
+        osf = self._i2c_call(self.rtc.osf)
+        if osf is None:
+            return None
+        y, mo, d, h, minute = r[:5]
+        if y < 2020 or osf:  # unsynced, or OSF = time untrusted (R17): no schedule, no auto moves
+            self.rtc_synced = False
+            self._last_local = None
+            self.today_schedule = None
+            self._date = None
+            return False, 0
+        now = local_minutes(y, mo, d, h, minute)
+        if now >= 1440:  # CEST: CET 23:xx is already next local day
+            now -= 1440
+            y, mo, d = next_day(y, mo, d)
+        prev = None if self._last_local is None else self._last_local[:3]
+        self.rtc_synced = True
+        self._last_local = (y, mo, d, now)
+        if (y, mo, d) != self._date:
+            self._date = (y, mo, d)
+            self.today_schedule = schedule(self.config, y, mo, d)
+            o, c = self.today_schedule
+            self.config_warning = "open >= close: no auto moves today" if o >= c else ""
+        if prev is not None and prev != (y, mo, d):
+            self._emit_day(prev, (y, mo, d))
+        return True, now
 
-        rise, sset = sun_times_cet(y, m, d)
-        dst = 60 if is_dst(y, m, d, h) else 0
+    def _start_move(self, direction: str, trigger: int, reverse: bool = False) -> None:
+        """Single owner of movement. Bumps _move_gen so any older _run_move task exits untouched."""
+        self._trigger = trigger
+        self.state = GateState.MOVING_OPEN if direction == "open" else GateState.MOVING_CLOSE
+        self._move_start_ms = ticks_ms()
+        self._move_gen += 1
+        coro = self._run_move(direction, self._move_gen, reverse)
+        try:
+            asyncio.create_task(coro)
+        except RuntimeError:  # no running loop (CPython tests)
+            coro.close()
 
-        wo = window_open_local(self.config, rise, dst)
-        wc = window_close_local(self.config, sset, dst)
-        ao = abs_open_local(self.config, rise, dst)
-        ac = abs_close_local(self.config, sset, dst)
+    def _stop_motor(self) -> None:
+        """Stop order (R19): nSLEEP LOW first (GPIO kill switch), then IN1=IN2=LOW best effort."""
+        self.nsleep.value(0)
+        try:
+            self.motor.stop()
+        except OSError:
+            pass  # driver already asleep, or PCF unreachable
 
-        warnings: list[str] = []
-        if ao < wo:
-            warnings.append(
-                f"abs_open {ao // 60:02d}:{ao % 60:02d} < "
-                f"window_open {wo // 60:02d}:{wo % 60:02d} — clamped"
-            )
-            ao = wo
-        if ac < wc:
-            warnings.append(
-                f"abs_close {ac // 60:02d}:{ac % 60:02d} < "
-                f"window_close {wc // 60:02d}:{wc % 60:02d} — clamped"
-            )
-            ac = wc
-        if ao >= ac:
-            warnings.append("abs_open >= abs_close — backstop conflict, verify config")
+    async def _run_move(self, direction: str, gen: int, reverse: bool = False) -> None:
+        if gen != self._move_gen:
+            return
+        if reverse:  # coast, then drive the opposite way (decision 11)
+            self._stop_motor()
+            await sleep_ms(REVERSAL_DEAD_MS)
+            if gen != self._move_gen:
+                return
+        self.nsleep.value(1)
+        await sleep_ms(1)
+        if gen != self._move_gen:
+            return
+        try:
+            if direction == "open":
+                self.motor.forward()
+                limit = self.limit_top
+            else:
+                self.motor.backward()
+                limit = self.limit_bottom
+        except OSError:  # PCF8574 unreachable: cannot drive, do not leave nSLEEP high (R36)
+            self._halt(GateState.ERROR)
+            return
+        while gen == self._move_gen and limit.value() == 1:  # 1 = not triggered (pull-up)
+            if self.nfault.value() == 0 or self._timed_out():
+                self._halt(GateState.SAFETY_STOP)
+                return
+            await sleep_ms(20)
+        if gen != self._move_gen or self.state not in (GateState.MOVING_OPEN, GateState.MOVING_CLOSE):
+            return  # superseded, or tick already safety-stopped us
+        self._stop_motor()
+        self._on_limit_reached()
 
-        self._config_warning = "; ".join(warnings)
-        if self._config_warning:
-            self._log_warning(self._config_warning)
-        self._today_times = (wo, wc, ao, ac)
+    def _on_limit_reached(self) -> None:
+        opening = self.state == GateState.MOVING_OPEN
+        if self._trigger == MovementTrigger.MANUAL:
+            self.state = GateState.MANUAL_HOLD_OPEN if opening else GateState.MANUAL_HOLD_CLOSED
+        else:
+            self.state = GateState.IDLE_OPEN if opening else GateState.IDLE_CLOSED
+        self._emit("open" if opening else "close", self._trigger)
+
+    def _timed_out(self) -> bool:
+        return ticks_diff(ticks_ms(), self._move_start_ms) > self.config["safety"]["move_timeout_s"] * 1000
+
+    def _halt(self, state: str) -> None:
+        was = self.state
+        self._move_gen += 1  # running _run_move must exit silently, never overwrite this state
+        self.state = state
+        self._stop_motor()
+        if state == GateState.ERROR:
+            if was != GateState.ERROR:  # ERROR-once guard (R29)
+                self._emit("error", MovementTrigger.AUTO)
+        elif state == GateState.SAFETY_STOP:
+            self._emit("safety_stop", self._trigger)
 
     def _i2c_call(self, fn):
         try:
@@ -341,87 +298,5 @@ class CoopController:
         except OSError:
             self._i2c_fail_count += 1
             if self._i2c_fail_count >= 3:
-                self._enter_error()
+                self._halt(GateState.ERROR)
             return None
-
-    def _safety_stop(self) -> None:
-        self.nsleep.value(0)  # nSLEEP=LOW (~2µA) — always
-        self.motor.stop()  # IN1=IN2=LOW coast — best-effort via PCF8574
-        if self.state != GateState.SAFETY_STOP:
-            self._today_rec_error_count += 1
-            self._today_rec[4] = self._today_rec_error_count
-        self.state = GateState.SAFETY_STOP
-
-    def _enter_error(self) -> None:
-        self.motor.stop()
-        self.nsleep.value(0)
-        self.state = GateState.ERROR
-
-    def _on_midnight(self, y: int, m: int, d: int, h: int, minute: int) -> None:
-        from src.logs import days_since_2025, write_record
-
-        try:
-            write_record(tuple(self._today_rec))
-        except Exception as e:
-            self._log_warning(f"log write failed: {e}")
-        self._today_rec = [days_since_2025(y, m, d), 0xFFFF, 0xFFFF, 0, 0]
-        self._today_rec_error_count = 0
-        self._resolve_times(y, m, d, h, minute)
-
-    def _on_limit_reached(self) -> None:
-        """Transition MOVING_* → IDLE_* or MANUAL_HOLD_* based on _trigger."""
-        from src.astro import local_minutes
-
-        y, mo, d, h, minute, *_ = self.rtc.datetime()
-        now = local_minutes(y, mo, d, h, minute)
-        opening = self.state == GateState.MOVING_OPEN
-
-        if opening:
-            if self._today_rec[1] == 0xFFFF:
-                self._today_rec[1] = now
-            self.state = (
-                GateState.MANUAL_HOLD_OPEN
-                if self._trigger == MovementTrigger.MANUAL
-                else GateState.IDLE_OPEN
-            )
-        else:
-            self._today_rec[2] = now
-            self.state = (
-                GateState.MANUAL_HOLD_CLOSED
-                if self._trigger == MovementTrigger.MANUAL
-                else GateState.IDLE_CLOSED
-            )
-
-    def _log_warning(self, msg: str) -> None:
-        print(f"[WARNING] {msg}")  # Phase 6 writes to binary log
-
-    async def _run_move(self, direction: str) -> None:
-        from src.compat import sleep_ms, ticks_ms
-
-        self._move_start_ms = ticks_ms()
-        self.nsleep.value(1)
-        await sleep_ms(1)
-
-        if direction == "open":
-            self.motor.forward()
-            limit_pin = self.limit_top
-        else:
-            self.motor.backward()
-            limit_pin = self.limit_bottom
-
-        while limit_pin.value() == 1:  # HIGH = not triggered (pull-up)
-            if self._abort_move:
-                self._abort_move = False
-                self.motor.stop()
-                self.nsleep.value(0)
-                return
-            if self.nfault.value() == 0:  # active-low fault
-                self._safety_stop()
-                return
-            if self.state == GateState.SAFETY_STOP:  # timeout detected by tick()
-                return
-            await sleep_ms(20)
-
-        self.motor.stop()
-        self.nsleep.value(0)
-        self._on_limit_reached()

@@ -1,171 +1,131 @@
 # Licensed under CC BY-NC-SA 4.0. Strictly non-commercial.
 import json
-from dataclasses import asdict, dataclass, field
+import os
+
+from astro import is_dst, sun_times_cet
+
+DEFAULTS = {
+    "location": {"lat": 50.01, "lon": 20.99},  # Tarnow
+    "schedule": {
+        "open_after_sunrise_min": 30,
+        "close_after_dusk_min": 0,
+        "open_not_before_min": None,  # local minutes 0..1439, None = off
+        "close_not_after_min": None,  # local minutes 0..1439, None = off
+    },
+    "safety": {"move_timeout_s": 21},
+    "wifi": {"ap_password": "", "webrepl_password": ""},  # ap "" = open AP (R6); webrepl "" = WebREPL off
+}
+
+_ALT_RISE = -0.833
+_ALT_DUSK = -6
+_DST_MIN = 60
+_OFFSET = (-120, 180)
+_TIMEOUT = (5, 120)
+_replace = getattr(os, "replace", os.rename)
 
 
 class ConfigError(Exception):
     pass
 
 
-@dataclass(slots=True)
-class WindowLegacy:
-    hour_open: int = 6
-    hour_close: int = 18
+def _copy(obj):
+    if isinstance(obj, dict):
+        return {k: _copy(v) for k, v in obj.items()}
+    return obj
 
 
-@dataclass(slots=True)
-class WindowSun:
-    sunrise_offset_min: int = -30
-    sunset_offset_min: int = 30
+def default_config() -> dict:
+    return _copy(DEFAULTS)
 
 
-@dataclass(slots=True)
-class WindowConfig:
-    mode: str = "sun_position"
-    legacy: WindowLegacy = field(default_factory=WindowLegacy)
-    sun: WindowSun = field(default_factory=WindowSun)
+def _merge(base: dict, over) -> dict:
+    if not isinstance(over, dict):
+        raise ConfigError("section is not an object")
+    out = {}
+    for k, v in base.items():
+        if k not in over:
+            out[k] = _copy(v)
+        elif isinstance(v, dict):
+            out[k] = _merge(v, over[k])
+        else:
+            out[k] = over[k]
+    return out
 
 
-@dataclass(slots=True)
-class OverrideOpenConfig:
-    mode: str = "dynamic"
-    fixed_hour: int = 8
-    after_sunrise_min: int = 120
+def _check_keys(name: str, d, ref: dict) -> None:
+    if not isinstance(d, dict):
+        raise ConfigError(name + ": not an object")
+    for k in ref:
+        if k not in d:
+            raise ConfigError(name + ": missing key " + k)
+    for k in d:
+        if k not in ref:
+            raise ConfigError(name + ": unknown key " + str(k))
 
 
-@dataclass(slots=True)
-class OverrideCloseConfig:
-    mode: str = "fixed"
-    fixed_hour: int = 22
-    after_sunset_min: int = 120
+def _check_num(name: str, v, lo, hi, want_int: bool) -> None:
+    t = type(v)  # type(), not isinstance: bool must be rejected
+    if not (t is int or (t is float and not want_int)):
+        raise ConfigError(name + ": wrong type")
+    if not lo <= v <= hi:
+        raise ConfigError(name + ": " + str(v) + " outside " + str(lo) + ".." + str(hi))
 
 
-@dataclass(slots=True)
-class LightConfig:
-    lux_open: float = 8.0
-    lux_close: float = 3.0
+def validate_config(cfg) -> None:
+    _check_keys("config", cfg, DEFAULTS)
+    for section, ref in DEFAULTS.items():
+        _check_keys(section, cfg[section], ref)
+    loc = cfg["location"]
+    _check_num("location.lat", loc["lat"], -90, 90, False)
+    _check_num("location.lon", loc["lon"], -180, 180, False)
+    sch = cfg["schedule"]
+    _check_num("schedule.open_after_sunrise_min", sch["open_after_sunrise_min"], *_OFFSET, True)
+    _check_num("schedule.close_after_dusk_min", sch["close_after_dusk_min"], *_OFFSET, True)
+    for key in ("open_not_before_min", "close_not_after_min"):
+        if sch[key] is not None:
+            _check_num("schedule." + key, sch[key], 0, 1439, True)
+    _check_num("safety.move_timeout_s", cfg["safety"]["move_timeout_s"], *_TIMEOUT, True)
+    pw = cfg["wifi"]["ap_password"]
+    # WPA2 passphrase = 8..63 printable ASCII (len in bytes == chars); non-ASCII would lock out the AP
+    if type(pw) is not str or not (pw == "" or (8 <= len(pw) <= 63 and all(" " <= c <= "~" for c in pw))):
+        raise ConfigError('wifi.ap_password: must be "" or 8..63 printable ASCII chars')
+    # WebREPL: C side keeps a 10-byte buffer (9 chars max, ValueError above); "" = off
+    wr = cfg["wifi"]["webrepl_password"]
+    if type(wr) is not str or not (wr == "" or (4 <= len(wr) <= 9 and all(" " <= c <= "~" for c in wr))):
+        raise ConfigError('wifi.webrepl_password: must be "" or 4..9 printable ASCII chars')
 
 
-@dataclass(slots=True)
-class SafetyConfig:
-    move_timeout_s: int = 21
+def load(path: str) -> dict:
+    try:
+        with open(path) as f:
+            cfg = _merge(DEFAULTS, json.load(f))
+        validate_config(cfg)
+        return cfg
+    except Exception as e:  # any failure -> defaults, never raise
+        print("config: using defaults:", e)
+        return default_config()
 
 
-@dataclass(slots=True)
-class Config:
-    window: WindowConfig = field(default_factory=WindowConfig)
-    override_open: OverrideOpenConfig = field(default_factory=OverrideOpenConfig)
-    override_close: OverrideCloseConfig = field(default_factory=OverrideCloseConfig)
-    light: LightConfig = field(default_factory=LightConfig)
-    safety: SafetyConfig = field(default_factory=SafetyConfig)
+def save(cfg: dict, path: str) -> None:
+    validate_config(cfg)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(cfg, f)
+    _replace(tmp, path)  # atomic; os.rename fails on Windows if target exists
 
 
-def default_config() -> Config:
-    return Config()
-
-
-def _to_dict(cfg: Config) -> dict:
-    return asdict(cfg)
-
-
-def _from_dict(data: dict) -> Config:
-    w = data.get("window", {})
-    legacy_d = w.get("legacy", {})
-    sun_d = w.get("sun", {})
-    oo = data.get("override_open", {})
-    oc = data.get("override_close", {})
-    light_d = data.get("light", {})
-    safety_d = data.get("safety", {})
-
-    return Config(
-        window=WindowConfig(
-            mode=w.get("mode", "sun_position"),
-            legacy=WindowLegacy(
-                hour_open=legacy_d.get("hour_open", 6),
-                hour_close=legacy_d.get("hour_close", 18),
-            ),
-            sun=WindowSun(
-                sunrise_offset_min=sun_d.get("sunrise_offset_min", -30),
-                sunset_offset_min=sun_d.get("sunset_offset_min", 30),
-            ),
-        ),
-        override_open=OverrideOpenConfig(
-            mode=oo.get("mode", "dynamic"),
-            fixed_hour=oo.get("fixed_hour", 8),
-            after_sunrise_min=oo.get("after_sunrise_min", 120),
-        ),
-        override_close=OverrideCloseConfig(
-            mode=oc.get("mode", "fixed"),
-            fixed_hour=oc.get("fixed_hour", 22),
-            after_sunset_min=oc.get("after_sunset_min", 120),
-        ),
-        light=LightConfig(
-            lux_open=light_d.get("lux_open", 8.0),
-            lux_close=light_d.get("lux_close", 3.0),
-        ),
-        safety=SafetyConfig(
-            move_timeout_s=safety_d.get("move_timeout_s", 21),
-        ),
-    )
-
-
-def load(path: str) -> Config:
-    with open(path) as f:
-        data = json.load(f)
-    return _from_dict(data)
-
-
-def save(cfg: Config, path: str) -> None:
-    with open(path, "w") as f:
-        json.dump(asdict(cfg), f, indent=2)
-
-
-def validate_config(
-    cfg: Config,
-    now_local_min: int,
-    rise_cet: int,
-    set_cet: int,
-    dst_offset: int,
-) -> None:
-    wo = window_open_local(cfg, rise_cet, dst_offset)
-    wc = window_close_local(cfg, set_cet, dst_offset)
-    ao = abs_open_local(cfg, rise_cet, dst_offset)
-    ac = abs_close_local(cfg, set_cet, dst_offset)
-
-    if ao < wo:
-        raise ConfigError(
-            f"abs_open ({ao // 60:02d}:{ao % 60:02d}) < window_open ({wo // 60:02d}:{wo % 60:02d})"
-        )
-    if ac < wc:
-        raise ConfigError(
-            f"abs_close ({ac // 60:02d}:{ac % 60:02d}) < "
-            f"window_close ({wc // 60:02d}:{wc % 60:02d})"
-        )
-    if ao >= ac:
-        raise ConfigError(
-            f"abs_open ({ao // 60:02d}:{ao % 60:02d}) >= abs_close ({ac // 60:02d}:{ac % 60:02d})"
-        )
-
-
-def window_open_local(cfg: Config, rise_cet: int, dst: int) -> int:
-    if cfg.window.mode == "sun_position":
-        return rise_cet + dst + cfg.window.sun.sunrise_offset_min
-    return cfg.window.legacy.hour_open * 60
-
-
-def window_close_local(cfg: Config, set_cet: int, dst: int) -> int:
-    if cfg.window.mode == "sun_position":
-        return set_cet + dst + cfg.window.sun.sunset_offset_min
-    return cfg.window.legacy.hour_close * 60
-
-
-def abs_open_local(cfg: Config, rise_cet: int, dst: int) -> int:
-    if cfg.override_open.mode == "dynamic":
-        return rise_cet + dst + cfg.override_open.after_sunrise_min
-    return cfg.override_open.fixed_hour * 60
-
-
-def abs_close_local(cfg: Config, set_cet: int, dst: int) -> int:
-    if cfg.override_close.mode == "dynamic":
-        return set_cet + dst + cfg.override_close.after_sunset_min
-    return cfg.override_close.fixed_hour * 60
+def schedule(cfg: dict, y: int, m: int, d: int) -> tuple:
+    loc = cfg["location"]
+    lat, lon = loc["lat"], loc["lon"]
+    rise, _ = sun_times_cet(y, m, d, lat, lon, alt_deg=_ALT_RISE)
+    _, dusk = sun_times_cet(y, m, d, lat, lon, alt_deg=_ALT_DUSK)
+    dst = _DST_MIN if is_dst(y, m, d, 12) else 0
+    sch = cfg["schedule"]
+    open_min = rise + dst + sch["open_after_sunrise_min"]
+    close_min = dusk + dst + sch["close_after_dusk_min"]
+    # clamps after DST + offsets: they are local-time bounds
+    if sch["open_not_before_min"] is not None:
+        open_min = max(open_min, sch["open_not_before_min"])
+    if sch["close_not_after_min"] is not None:
+        close_min = min(close_min, sch["close_not_after_min"])
+    return open_min, close_min

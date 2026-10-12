@@ -31,13 +31,13 @@ void sGate::openGate() {
     if (!servo.attached())
         servo.attach(servoPin);
     servo.write(openSpeed);
-    gate.startMovingTime = millis();
+    this->startMovingTime = millis();
     ledGreen.turnOff();
     ledGreen.shouldBlink = true;
     ledRed.shouldBlink = false;
     ledRed.turnOff();
     #ifdef LOG_MOVES
-    logInfo('O');
+    logInfo(GateMove::Open);
     writeLogIntoEeprom();
     #endif
 }
@@ -54,12 +54,12 @@ void sGate::closeGate() {
     if (!servo.attached())
         servo.attach(servoPin);
     servo.write(closeSpeed);
-    gate.startMovingTime = millis();
+    this->startMovingTime = millis();
     ledGreen.turnOff();
     ledGreen.shouldBlink = true;
     ledRed.shouldBlink = false;
     #ifdef LOG_MOVES
-    logInfo('C');
+    logInfo(GateMove::Close);
     writeLogIntoEeprom();
     #endif
 }

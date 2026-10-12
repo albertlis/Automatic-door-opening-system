@@ -132,16 +132,16 @@ wheels = [
 ]
 
 [[package]]
-name = "smart-kurnik-v2"
+name = "smart-coop-v2"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "microdot" },
-    { name = "pyright" },
 ]
 
 [package.optional-dependencies]
 dev = [
+    { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
@@ -149,8 +149,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "microdot", extras = ["asyncio"], specifier = ">=2.0.6" },
-    { name = "pyright", specifier = ">=1.1.409" },
+    { name = "microdot", specifier = ">=2.0.6" },
+    { name = "pyright", marker = "extra == 'dev'", specifier = ">=1.1.409" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },

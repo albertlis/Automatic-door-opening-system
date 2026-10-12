@@ -8,7 +8,7 @@ else:
     import time as _time
 
     def ticks_ms() -> int:
-        return int(_time.time() * 1000)
+        return int(_time.monotonic() * 1000)
 
     def ticks_diff(a: int, b: int) -> int:
         return a - b

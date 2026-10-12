@@ -1,3 +1,6 @@
+> Historical migration notes (v1 -> v2 planning).
+> Outdated vs current design: see CLAUDE.md and docs/phases.
+
 # Smart Kurnik V2 — Architektura Migracji
 
 ## 1. Kontekst i Cel

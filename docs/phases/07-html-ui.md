@@ -1,521 +1,244 @@
-# Phase 7 — HTML UI
+# Phase 7 — HTML UI (single page)
 
 ## Goal
 
-Implement the four static HTML pages. No automated tests — verify manually with `python run_local.py` and a browser.
+One static page `src/www/index.html`: status, manual control, forecast, time sync,
+config form, reboot. Mobile-first. Works on the coop AP with NO internet.
+Vanilla JS, inline CSS, no external resources of any kind.
 
 ## Prerequisites
 
-- Phase 5 complete (all API endpoints working)
-- Phase 6 complete (`/api/logs` real data)
+- Phase 5 complete: `/api/status`, `/api/config` (GET/POST), `/api/time`,
+  `/api/manual`, `/api/forecast` (fixed 14 days), `/api/log`, `/api/reboot`, `GET /` serving the file.
+- Phase 5 also provides `wifi.ap_password_set` (bool) in `GET /api/config` (R6).
+- Phase 6 complete: `events` in `/api/status` = last 5, newest first (may be `[]`).
 
 ## Deliverables
 
 | File | Status |
 |------|--------|
 | `src/www/index.html` | create |
-| `src/www/config.html` | create |
-| `src/www/debug.html` | create |
-| `src/www/logs.html` | update (created in Phase 6, enhance here) |
+| `tests/test_api.py` | add size-budget test (§5) |
 
-## Stack
+Only one file. No other pages, no build step, no npm.
 
-- **Pico.css v2** — semantic HTML styling, zero class spam. Use CDN: `https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css`
-- **HTMX 2.x** — declarative AJAX. Use CDN: `https://unpkg.com/htmx.org@2.0.0`
-- **SSE extension** — `https://unpkg.com/htmx-ext-sse@2.2.1/sse.js`
-- **Vanilla JS** — minimum, only for time sync button and SVG lux sparkline
+## Design rules
 
-No build tools. No npm. No bundler. Pure static HTML.
+- Inline `<style>` and `<script>`. Zero external URLs. Phone on the AP has no internet.
+- CSS lib: **simple.css v2.3.7** (MIT, npm `simpledotcss`, 9429 B minified), inlined into `<style>` with license comment. Classless; dark mode auto via `prefers-color-scheme`. Own CSS after the lib: badge state colours, banners, `.card`, ERROR blink, touch sizes. Rejected: water.css 2 (22668 B, light only), MVP.css 1.18 (10264 B, dark mode only with `color-mode="user"` attr), Pico classless 2 (71040 B), new.css (npm/jsDelivr fetch failed).
+- UI labels in Polish (project UI language). Code, comments and this doc in English.
+- Server data rendered with `textContent` / DOM nodes, never `innerHTML` with
+  server strings (config warning, events, error text).
+- Poll `/api/status` every 3 s. One request in flight at a time (`busy` flag).
+- Size budget: **gzip -9 < 10 KB (served as /www/index.html.gz)** (MicroPython LittleFS, RAM for one send).
+- Mobile-first: single column, `max-width: 32rem`, buttons min-height 44 px,
+  font-size 16 px (no iOS zoom), no hover-only actions.
 
----
+## 1. Layout (top to bottom)
 
-## 1. `src/www/index.html` — Status Dashboard
+| Block | Element id | Content |
+|-------|-----------|---------|
+| Banner | `#banner` | offline / config warning (hidden when empty) |
+| AP warning | `#apwarn` | red, `Ustaw hasło AP (sieć jest otwarta)` when `wifi.ap_password_set` false; hidden otherwise. Separate from `#banner` (poll clears `#banner`) |
+| State | `#state` | badge: state name, colour by state |
+| Time | `#time` | `RTC: HH:MM` or `Czas nieustawiony` when `rtc_synced` false |
+| Schedule | `#sched` | today open / close `HH:MM`, or `—` when `today_schedule` null |
+| Limits | `#limits` | GÓRA / DÓŁ, ✓ / ✗ |
+| Control | `#ctl` | buttons Otwórz / Zamknij (disabled in SAFETY_STOP / ERROR) |
+| Stop message | `#stopmsg` | server 409 text shown verbatim, see §3 |
+| Forecast | `#fc` | inline SVG, 14 days (drawn by JS) |
+| Events | `#ev` | last 5 events, newest first (Phase 6 format) or `—` |
+| Time sync | `#sync` | button Synchronizuj czas + result text |
+| Config | `#cfg` | form, see §4 |
+| Reboot | `#reboot` | button with confirm |
 
-### What it shows
+## 2. Badge colours (CSS selectors = state names)
 
-- **Gate state badge** — colored pill matching state name
-- **Schedule today** — `HH:MM – HH:MM` for sensor window + backstop times
-- **Warning banner** — yellow if `config_warning` non-empty
-- **Lux values** — the 5 lux samples as text + inline SVG sparkline (last N readings)
-- **Time** — RTC time (HH:MM)
-- **Limit switches** — GÓRA / DÓŁ (active/inactive)
-- **VBAT** — voltage in V
-- **Manual buttons** — Open / Close → POST `/api/manual?action=open|close`
-- **30-day forecast SVG** — embedded inline from API data (rendered server-side via `/`)
+| State | Background | Note |
+|-------|-----------|------|
+| IDLE_OPEN, MANUAL_HOLD_OPEN | green | |
+| IDLE_CLOSED, MANUAL_HOLD_CLOSED | red | |
+| MOVING_OPEN, MOVING_CLOSE | amber | |
+| SAFETY_STOP | orange | message shown |
+| ERROR | dark red | blink 4 Hz (matches LED signal) |
+| INIT | grey | |
 
-### SSE + fallback
-
-Primary: SSE via HTMX extension updating status badge/lux every 2s.
-Fallback: polling `/api/status` every 2s if SSE unavailable.
-
-```html
-<!DOCTYPE html>
-<html lang="pl">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Coop — Status</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
-  <script src="https://unpkg.com/htmx.org@2.0.0"></script>
-  <script src="https://unpkg.com/htmx-ext-sse@2.2.1/sse.js"></script>
-  <style>
-    .badge { display:inline-block; padding:.25em .75em; border-radius:2em; font-weight:bold; }
-    .IDLE_OPEN,.MANUAL_HOLD_OPEN { background:#2a7; color:#fff; }
-    .IDLE_CLOSED,.MANUAL_HOLD_CLOSED { background:#c33; color:#fff; }
-    .MOVING_OPEN,.MOVING_CLOSE { background:#f90; color:#000; }
-    .SAFETY_STOP { background:#f60; color:#fff; }
-    .ERROR { background:#f00; color:#fff; animation:blink 0.25s step-end infinite; }
-    @keyframes blink { 50% { opacity:0; } }
-    .warn-banner { background:#fa0; color:#000; padding:.5em 1em; border-radius:.5em; margin-bottom:1em; }
-    .lux-spark { display:inline-block; vertical-align:middle; }
-  </style>
-</head>
-<body>
-  <main class="container">
-    <nav>
-      <a href="/"><strong>Status</strong></a> |
-      <a href="/config">Konfiguracja</a> |
-      <a href="/logs">Logi</a> |
-      <a href="/debug">Debug</a>
-    </nav>
-
-    <!-- SSE live status block -->
-    <div id="status-block"
-         hx-ext="sse"
-         sse-connect="/api/events"
-         sse-swap="message"
-         hx-swap="none">
-      <!-- Fallback: poll if SSE not available -->
-      <div hx-get="/api/status"
-           hx-trigger="every 2s"
-           hx-swap="innerHTML"
-           hx-target="#status-content">
-      </div>
-    </div>
-
-    <div id="status-content"
-         hx-get="/api/status"
-         hx-trigger="load"
-         hx-swap="innerHTML">
-      <p aria-busy="true">Ładowanie…</p>
-    </div>
-
-    <script>
-      // Parse SSE event and update status-content
-      document.body.addEventListener("htmx:sseMessage", function(evt) {
-        try {
-          updateStatus(JSON.parse(evt.detail.data));
-        } catch(e) {}
-      });
-
-      // Also handle hx-get polling response
-      document.body.addEventListener("htmx:afterOnLoad", function(evt) {
-        if (evt.detail.pathInfo && evt.detail.pathInfo.requestPath === "/api/status") {
-          try {
-            updateStatus(JSON.parse(evt.detail.xhr.responseText));
-          } catch(e) {}
-        }
-      });
-
-      function fmtMin(m) {
-        if (m === null || m === undefined) return "—";
-        return String(Math.floor(m/60)).padStart(2,"0") + ":" + String(m%60).padStart(2,"0");
-      }
-
-      function updateStatus(d) {
-        const el = document.getElementById("status-content");
-        const warn = d.config_warning
-          ? `<div class="warn-banner">⚠ ${d.config_warning}</div>`
-          : "";
-        const sched = d.today_schedule
-          ? `<p>Okno sensora: <strong>${fmtMin(d.today_schedule.wo)} – ${fmtMin(d.today_schedule.wc)}</strong> &nbsp;
-             Backstop: <strong>${fmtMin(d.today_schedule.ao)}</strong> / <strong>${fmtMin(d.today_schedule.ac)}</strong></p>`
-          : "";
-        const luxText = d.lux ? d.lux.map(v => v.toFixed(1)).join(", ") + " lx" : "—";
-        const limitTop = d.limit_top ? "✓ GÓRA" : "✗ GÓRA";
-        const limitBot = d.limit_bottom ? "✓ DÓŁ" : "✗ DÓŁ";
-        const vbat = d.vbat_v !== null && d.vbat_v !== undefined
-          ? d.vbat_v.toFixed(2) + " V" : "—";
-        el.innerHTML = `
-          ${warn}
-          <p>Stan: <span class="badge ${d.state}">${d.state}</span></p>
-          <p>Czas RTC: <strong>${d.time || "—"}</strong></p>
-          ${sched}
-          <p>Lux: ${luxText}</p>
-          <p>Krańcówki: ${limitTop} &nbsp; ${limitBot}</p>
-          <p>Bateria RTC: ${vbat}</p>
-        `;
-      }
-    </script>
-
-    <!-- Manual control buttons -->
-    <section>
-      <h2>Sterowanie</h2>
-      <button hx-post="/api/manual?action=open"
-              hx-confirm="Otworzyć drzwi?"
-              hx-swap="none">
-        Otwórz
-      </button>
-      <button hx-post="/api/manual?action=close"
-              hx-confirm="Zamknąć drzwi?"
-              hx-swap="none"
-              class="secondary">
-        Zamknij
-      </button>
-    </section>
-
-    <!-- 30-day forecast SVG (server-side rendered, loaded once) -->
-    <section>
-      <h2>Prognoza 30 dni</h2>
-      <div hx-get="/api/forecast-svg" hx-trigger="load" hx-swap="innerHTML">
-        <p aria-busy="true">Ładowanie wykresu…</p>
-      </div>
-    </section>
-  </main>
-</body>
-</html>
+```css
+.badge{display:inline-block;padding:.3em .8em;border-radius:1em;font-weight:700;color:#fff}
+.IDLE_OPEN,.MANUAL_HOLD_OPEN{background:#2a7}
+.IDLE_CLOSED,.MANUAL_HOLD_CLOSED{background:#c33}
+.MOVING_OPEN,.MOVING_CLOSE{background:#e90;color:#000}
+.SAFETY_STOP{background:#f60}
+.ERROR{background:#900;animation:b .25s step-end infinite}
+@keyframes b{50%{opacity:0}}
 ```
 
-Add `/api/forecast-svg` endpoint to `web.py`:
+## 3. Behaviour
+
+### 3.1 Polling
+
+```js
+let busy = false, fails = 0;
+async function poll() {
+  if (busy) return;
+  busy = true;
+  try {
+    const r = await fetch("/api/status");
+    if (!r.ok) throw new Error(r.status);
+    render(await r.json());
+    fails = 0;
+    banner("");
+  } catch (e) {
+    if (++fails >= 2) banner("Brak połączenia z kurnikiem");
+  } finally {
+    busy = false;
+  }
+}
+setInterval(poll, 3000);
+poll();
+```
+
+- Two consecutive failures → offline banner. Next success clears it.
+- Poll keeps running during SAFETY_STOP / ERROR (state must stay visible).
+
+### 3.2 Control buttons
+
+- Enabled when state not in `SAFETY_STOP`, `ERROR`.
+- In `SAFETY_STOP`: both disabled, `#stopmsg` = `SAFETY_STOP: clear with physical button at the coop`
+  (exact server text; UI shows it verbatim, no rewording).
+- In `ERROR`: `#stopmsg` = `ERROR: reboot required`. Reboot button stays enabled.
+- POST `/api/manual?action=open|close`. Non-200 → show `error` field from JSON in `#stopmsg`.
+- No confirm dialog on move buttons (decision: fewer taps on phone). Reboot keeps `confirm()`.
+
+### 3.3 Time sync
+
+- Button POST `/api/time` with body `{"timestamp_ms": Date.now()}`.
+- Result text: `Zsynchronizowano` on 200, else `Błąd: <error>` (incl. `rtc write failed` on 500).
+- Shown prominently when `rtc_synced` is false (yellow hint next to time).
+
+### 3.4 Forecast (client-side SVG)
+
+- On load and after successful config save: GET `/api/forecast` (fixed 14 days, no params, R26).
+- Response: `[[open, close], ...]` minutes from midnight local. Empty list → text `Brak danych (czas nieustawiony)`.
+- Draw one `<svg viewBox="0 0 300 160">`, width 100 %:
+  - `x(i) = 30 + i * 270 / (n - 1)` (n = number of rows; n = 1 → x = 30)
+  - `y(m) = 4 + m * 140 / 1440` (00:00 top, 24:00 bottom)
+  - Two `<polyline>`: open (green `#2a7`), close (orange `#f90`).
+  - Y labels 00 / 06 / 12 / 18 / 24, X labels +0 / +7 / +13.
+- Built with `document.createElementNS` or with an SVG string built from numbers only
+  (no server text inside the SVG). Numbers only → safe to use `innerHTML`.
+
+```js
+function drawForecast(rows) {
+  const n = rows.length, x = i => 30 + (n > 1 ? i * 270 / (n - 1) : 0),
+        y = m => 4 + m * 140 / 1440;
+  const pts = k => rows.map((r, i) => x(i).toFixed(1) + "," + y(r[k]).toFixed(1)).join(" ");
+  document.getElementById("fc").innerHTML =
+    '<svg viewBox="0 0 300 160" style="width:100%;background:#111">' +
+    '<polyline fill="none" stroke="#2a7" stroke-width="2" points="' + pts(0) + '"/>' +
+    '<polyline fill="none" stroke="#f90" stroke-width="2" points="' + pts(1) + '"/>' +
+    '</svg>';
+}
+```
+
+### 3.5 Events
+
+- `status.events` (last 5, newest first, Phase 6 format). Render as `<li>` with `textContent`.
+- Empty → `—`.
+
+### 3.6 Reboot
+
+- `confirm("Na pewno zrestartować urządzenie?")` → POST `/api/reboot`.
+- On 200: show `Restart…`, reload page after 5 s. AP session ends on reboot (api.md).
+
+### 3.7 AP password warning
+
+- Source: `wifi.ap_password_set` from `GET /api/config` (on load and after every successful save).
+  `/api/status` does not carry it.
+- `false` → show `#apwarn` (red): `Ustaw hasło AP (sieć jest otwarta)`. `true` → hidden.
+- Text is a fixed HTML string, not server text. Poll never touches `#apwarn`.
+
+## 4. Config form
+
+- On load: GET `/api/config` → keep the full object in memory (`cfgFull`).
+  Form shows only the editable fields; untouched keys stay as received.
+- Fields:
+
+| Input | JSON path | Type | Range (server) |
+|-------|-----------|------|----------------|
+| Szerokość | `location.lat` | number | -90..90 |
+| Długość | `location.lon` | number | -180..180 |
+| Otwarcie po wschodzie (min) | `schedule.open_after_sunrise_min` | integer | -120..180 |
+| Zamknięcie po zmierzchu (min) | `schedule.close_after_dusk_min` | integer | -120..180 |
+| Timeout ruchu (s) | `safety.move_timeout_s` | integer | 5..120 |
+| Hasło AP | `wifi.ap_password` | password | `""` or 8..63 chars (write-only) |
+| Wyczyść hasło (otwarta sieć AP) | `wifi.ap_password` | checkbox | sends `""` (R39) |
+
+- Password field is never prefilled.
+  - Blank input and checkbox unchecked = keep stored password (key omitted from POST).
+  - Typed value = new password (8..63 chars).
+  - Checkbox `clear password (open AP)` checked = send `ap_password: ""` (open AP, R39).
+    Checking it disables the password input (its value is ignored).
+- Submit: copy `cfgFull`, delete `wifi.ap_password_set` (GET-only), overwrite the six fields,
+  set `wifi.ap_password` only when typed or checkbox checked (checkbox wins: `""`), POST `/api/config`.
+  - 200 → `Zapisano.` + reload forecast.
+  - 400 → show server `error` text verbatim (e.g. `safety.move_timeout_s: 500 outside 5..120`).
+- Integers: `Number.isInteger` check in JS before POST; server is the authority.
+- Keys not in the form are sent back unchanged (future keys survive round trip), except
+  `wifi.ap_password_set` which is always removed (server rejects it).
+
+## 5. Size-budget test (add to `tests/test_api.py`, phase 7)
 
 ```python
-@app.route("/api/forecast-svg")
-async def forecast_svg(request):
-    from src.web import _build_forecast_svg
-    svg = _build_forecast_svg(ctrl.get_forecast(30))
-    return Response(body=svg, headers={"Content-Type": "image/svg+xml"})
+import gzip
+
+def test_index_under_size_budget():
+    path = "src/www/index.html"   # CPython path (INDEX_PATH on device is /www/index.html.gz)
+    with open(path, "rb") as f:
+        size = len(gzip.compress(f.read(), 9))   # gzip -9 size, what gets served
+    if size >= 10 * 1024:
+        raise ValueError("index.html gzip -9 over 10 KB budget")
 ```
 
----
+Failing-first: file missing → test fails. Creating the file is the fix.
 
-## 2. `src/www/config.html` — Configuration Editor
+## 6. Manual browser checklist
 
-```html
-<!DOCTYPE html>
-<html lang="pl">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Coop — Configuration</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
-  <script src="https://unpkg.com/htmx.org@2.0.0"></script>
-</head>
-<body>
-  <main class="container">
-    <nav>
-      <a href="/">Status</a> |
-      <a href="/config"><strong>Konfiguracja</strong></a> |
-      <a href="/logs">Logi</a> |
-      <a href="/debug">Debug</a>
-    </nav>
+Run `uv run python run_local.py` → open `http://localhost:5000` in a phone-sized
+browser window (DevTools 375 px width) and on a real phone on the AP (device stage).
 
-    <h1>Konfiguracja</h1>
+- [ ] Badge shows `IDLE_CLOSED` (dev runner state) with red colour.
+- [ ] Time `RTC: 12:00` visible; updates every 3 s.
+- [ ] Schedule shows `HH:MM` for open and close.
+- [ ] Forecast SVG draws two polylines, 14 points each.
+- [ ] Otwórz → state goes `MOVING_OPEN`, then `MANUAL_HOLD_OPEN` (mock limits).
+- [ ] Zamknij while MOVING_OPEN → reverses.
+- [ ] Config form pre-filled from `/api/config`.
+- [ ] Submit `move_timeout_s=500` → red error text `safety.move_timeout_s: 500 outside 5..120`.
+- [ ] Valid save → `Zapisano.`; `config.local.json` written.
+- [ ] Sync button → `Zsynchronizowano`; `/api/status` time changes.
+- [ ] Reboot → confirm dialog appears; cancel does nothing.
+- [ ] Browser DevTools network tab: **no request leaves localhost** (no external URL).
+- [ ] Page size in DevTools: gzip -9 < 10 KB (served as /www/index.html.gz).
+- [ ] Turn off network / stop server → offline banner after ~6 s.
+- [ ] Forced SAFETY_STOP (dev hook or mock) → buttons disabled, exact text shown.
+- [ ] Fresh config (`ap_password` empty) → red `#apwarn` banner visible.
+- [ ] Save with 7-char password → red error `wifi.ap_password: must be "" or 8..63 chars`.
+- [ ] Save with 8+ char password → `Zapisano.`; `#apwarn` hidden; password field empty after save.
+- [ ] Save with password field blank → stored password kept (`ap_password_set` stays true).
+- [ ] Tick "clear password (open AP)" + save → `Zapisano.`; `#apwarn` shown; `ap_password_set` false (R39).
 
-    <div id="error-msg" style="color:red;display:none"></div>
-    <div id="ok-msg" style="color:green;display:none">Zapisano.</div>
+## 7. VERIFY ON DEVICE
 
-    <form id="cfg-form">
-      <fieldset>
-        <legend>Okno sensora</legend>
-        <label>Tryb
-          <select name="window.mode" id="window-mode">
-            <option value="sun_position">Słońce (dynamiczne)</option>
-            <option value="legacy">Stałe godziny</option>
-          </select>
-        </label>
-        <div id="sun-fields">
-          <label>Offset wschodu (min) <input type="number" name="window.sun.sunrise_offset_min"></label>
-          <label>Offset zachodu (min) <input type="number" name="window.sun.sunset_offset_min"></label>
-        </div>
-        <div id="legacy-fields" style="display:none">
-          <label>Godzina otwarcia <input type="number" name="window.legacy.hour_open" min="0" max="23"></label>
-          <label>Godzina zamknięcia <input type="number" name="window.legacy.hour_close" min="0" max="23"></label>
-        </div>
-      </fieldset>
-
-      <fieldset>
-        <legend>Siłowe otwarcie (backstop)</legend>
-        <label>Tryb
-          <select name="override_open.mode" id="open-mode">
-            <option value="dynamic">Dynamiczne (po wschodzie)</option>
-            <option value="fixed">Stała godzina</option>
-          </select>
-        </label>
-        <label>Minuty po wschodzie <input type="number" name="override_open.after_sunrise_min"></label>
-        <label>Stała godzina <input type="number" name="override_open.fixed_hour" min="0" max="23"></label>
-      </fieldset>
-
-      <fieldset>
-        <legend>Siłowe zamknięcie (backstop)</legend>
-        <label>Tryb
-          <select name="override_close.mode" id="close-mode">
-            <option value="fixed">Stała godzina</option>
-            <option value="dynamic">Dynamiczne (po zachodzie)</option>
-          </select>
-        </label>
-        <label>Minuty po zachodzie <input type="number" name="override_close.after_sunset_min"></label>
-        <label>Stała godzina <input type="number" name="override_close.fixed_hour" min="0" max="23"></label>
-      </fieldset>
-
-      <fieldset>
-        <legend>Czujnik światła</legend>
-        <label>Próg otwarcia (lux) <input type="number" step="0.5" name="light.lux_open"></label>
-        <label>Próg zamknięcia (lux) <input type="number" step="0.5" name="light.lux_close"></label>
-      </fieldset>
-
-      <fieldset>
-        <legend>Bezpieczeństwo</legend>
-        <label>Timeout ruchu (s) <input type="number" name="safety.move_timeout_s" min="5" max="60"></label>
-      </fieldset>
-
-      <button type="submit">Zapisz</button>
-    </form>
-
-    <!-- Time sync -->
-    <hr>
-    <section>
-      <h2>Synchronizacja Czasu</h2>
-      <p>Ustawia DS3231 na podstawie czasu przeglądarki (UTC → CET).</p>
-      <button id="sync-time-btn">Synchronizuj czas z przeglądarki</button>
-      <span id="sync-result"></span>
-    </section>
-
-    <script>
-      // Load current config and populate form
-      fetch("/api/config").then(r => r.json()).then(cfg => {
-        populateForm(cfg);
-        toggleModeFields();
-      });
-
-      function populateForm(cfg) {
-        document.querySelector("[name='window.mode']").value = cfg.window.mode;
-        document.querySelector("[name='window.sun.sunrise_offset_min']").value = cfg.window.sun.sunrise_offset_min;
-        document.querySelector("[name='window.sun.sunset_offset_min']").value = cfg.window.sun.sunset_offset_min;
-        document.querySelector("[name='window.legacy.hour_open']").value = cfg.window.legacy.hour_open;
-        document.querySelector("[name='window.legacy.hour_close']").value = cfg.window.legacy.hour_close;
-        document.querySelector("[name='override_open.mode']").value = cfg.override_open.mode;
-        document.querySelector("[name='override_open.after_sunrise_min']").value = cfg.override_open.after_sunrise_min;
-        document.querySelector("[name='override_open.fixed_hour']").value = cfg.override_open.fixed_hour;
-        document.querySelector("[name='override_close.mode']").value = cfg.override_close.mode;
-        document.querySelector("[name='override_close.after_sunset_min']").value = cfg.override_close.after_sunset_min;
-        document.querySelector("[name='override_close.fixed_hour']").value = cfg.override_close.fixed_hour;
-        document.querySelector("[name='light.lux_open']").value = cfg.light.lux_open;
-        document.querySelector("[name='light.lux_close']").value = cfg.light.lux_close;
-        document.querySelector("[name='safety.move_timeout_s']").value = cfg.safety.move_timeout_s;
-      }
-
-      function toggleModeFields() {
-        const wm = document.getElementById("window-mode").value;
-        document.getElementById("sun-fields").style.display = wm === "sun_position" ? "" : "none";
-        document.getElementById("legacy-fields").style.display = wm === "legacy" ? "" : "none";
-      }
-      document.getElementById("window-mode").addEventListener("change", toggleModeFields);
-
-      function formToConfig() {
-        const g = n => parseFloat(document.querySelector("[name='"+n+"']").value);
-        const s = n => document.querySelector("[name='"+n+"']").value;
-        return {
-          window: {
-            mode: s("window.mode"),
-            legacy: { hour_open: g("window.legacy.hour_open"), hour_close: g("window.legacy.hour_close") },
-            sun: { sunrise_offset_min: g("window.sun.sunrise_offset_min"), sunset_offset_min: g("window.sun.sunset_offset_min") }
-          },
-          override_open: {
-            mode: s("override_open.mode"),
-            fixed_hour: g("override_open.fixed_hour"),
-            after_sunrise_min: g("override_open.after_sunrise_min")
-          },
-          override_close: {
-            mode: s("override_close.mode"),
-            fixed_hour: g("override_close.fixed_hour"),
-            after_sunset_min: g("override_close.after_sunset_min")
-          },
-          light: { lux_open: g("light.lux_open"), lux_close: g("light.lux_close") },
-          safety: { move_timeout_s: g("safety.move_timeout_s") }
-        };
-      }
-
-      document.getElementById("cfg-form").addEventListener("submit", async function(e) {
-        e.preventDefault();
-        const errEl = document.getElementById("error-msg");
-        const okEl = document.getElementById("ok-msg");
-        errEl.style.display = "none";
-        okEl.style.display = "none";
-        const cfg = formToConfig();
-        const res = await fetch("/api/config", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(cfg)
-        });
-        const data = await res.json();
-        if (res.ok) {
-          okEl.style.display = "";
-        } else {
-          errEl.textContent = data.error || "Błąd zapisu";
-          errEl.style.display = "";
-        }
-      });
-
-      document.getElementById("sync-time-btn").addEventListener("click", async function() {
-        const res = await fetch("/api/time", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ timestamp_ms: Date.now() })
-        });
-        document.getElementById("sync-result").textContent = res.ok ? "✓ Zsynchronizowano" : "✗ Błąd";
-      });
-    </script>
-  </main>
-</body>
-</html>
-```
-
----
-
-## 3. `src/www/debug.html` — Debug Page
-
-```html
-<!DOCTYPE html>
-<html lang="pl">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Coop — Debug</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
-  <script src="https://unpkg.com/htmx.org@2.0.0"></script>
-</head>
-<body>
-  <main class="container">
-    <nav>
-      <a href="/">Status</a> |
-      <a href="/config">Konfiguracja</a> |
-      <a href="/logs">Logi</a> |
-      <a href="/debug"><strong>Debug</strong></a>
-    </nav>
-
-    <h1>Debug</h1>
-
-    <div hx-get="/api/status" hx-trigger="load, every 5s" hx-swap="innerHTML" id="debug-data">
-      <p aria-busy="true">Ładowanie…</p>
-    </div>
-
-    <script>
-      document.body.addEventListener("htmx:afterOnLoad", function(evt) {
-        if (evt.detail.pathInfo && evt.detail.pathInfo.requestPath === "/api/status") {
-          try {
-            const d = JSON.parse(evt.detail.xhr.responseText);
-            document.getElementById("debug-data").innerHTML = `
-              <table>
-                <tr><th>Stan enum</th><td>${d.state}</td></tr>
-                <tr><th>Czas RTC</th><td>${d.time}</td></tr>
-                <tr><th>Lux [5]</th><td>${(d.lux||[]).map(v=>v.toFixed(2)).join(", ")}</td></tr>
-                <tr><th>Krańcówka GÓRA</th><td>${d.limit_top}</td></tr>
-                <tr><th>Krańcówka DÓŁ</th><td>${d.limit_bottom}</td></tr>
-                <tr><th>VBAT</th><td>${d.vbat_v !== null && d.vbat_v !== undefined ? d.vbat_v.toFixed(3)+" V" : "—"}</td></tr>
-                <tr><th>Config warning</th><td>${d.config_warning || "—"}</td></tr>
-                <tr><th>Wersja firmware</th><td>v2.0.0-dev</td></tr>
-              </table>
-            `;
-          } catch(e) {}
-        }
-      });
-    </script>
-
-    <hr>
-    <section>
-      <h2>WebREPL</h2>
-      <p><a href="http://micropython.org/webrepl/#192.168.4.1:8266" target="_blank">
-        Otwórz WebREPL (192.168.4.1:8266)
-      </a></p>
-    </section>
-
-    <section>
-      <h2>Reboot</h2>
-      <button hx-post="/api/reboot"
-              hx-confirm="Na pewno zrestartować urządzenie?"
-              hx-swap="none"
-              class="secondary">
-        Restart
-      </button>
-    </section>
-  </main>
-</body>
-</html>
-```
-
----
-
-## 4. Wire Static File Serving in `web.py`
-
-Add routes for the HTML pages:
-
-```python
-@app.route("/config")
-async def config_page(request):
-    with open("src/www/config.html") as f:
-        return Response(body=f.read(), headers={"Content-Type": "text/html"})
-
-@app.route("/logs")
-async def logs_page(request):
-    with open("src/www/logs.html") as f:
-        return Response(body=f.read(), headers={"Content-Type": "text/html"})
-
-@app.route("/debug")
-async def debug_page(request):
-    with open("src/www/debug.html") as f:
-        return Response(body=f.read(), headers={"Content-Type": "text/html"})
-```
-
-On ESP32 (Phase 8), paths change to `/www/index.html` (LittleFS). Wrap path resolution in a helper:
-
-```python
-def _html_path(name: str) -> str:
-    import sys, os
-    candidates = [f"src/www/{name}", f"/www/{name}"]
-    for p in candidates:
-        try:
-            os.stat(p)
-            return p
-        except OSError:
-            continue
-    raise OSError(f"{name} not found")
-```
-
----
-
-## Manual Browser Checklist
-
-Run `python run_local.py` → open `http://localhost:5000`.
-
-### `/` Status page
-- [ ] Gate state badge visible with correct color
-- [ ] Time updates every 2s without page refresh
-- [ ] Lux values update live
-- [ ] "Harmonogram dziś" shows wo/wc/ao/ac in HH:MM format
-- [ ] Yellow warning banner appears when `config_warning` is set (set it manually in run_local.py)
-- [ ] 30-day SVG forecast renders (green polygon, orange dashed lines)
-- [ ] Open/Close buttons POST and update state immediately
-
-### `/config` Config page
-- [ ] Form pre-populated with current config values
-- [ ] Mode toggle: switching `window.mode` shows/hides sun vs legacy fields
-- [ ] Valid config submits → "Zapisano." message
-- [ ] Invalid config → red error message with specific field mentioned
-- [ ] Time sync button sets RTC (check `/api/status` time changes)
-
-### `/logs` Logs page
-- [ ] Table renders with records from mock data
-- [ ] Empty state shows "Brak zapisów."
-- [ ] `open_min=null` shows "—"
-
-### `/debug` Debug page
-- [ ] All fields populated from `/api/status`
-- [ ] Updates every 5s
-- [ ] WebREPL link is present (doesn't need to connect)
-- [ ] Reboot button shows confirmation dialog
+- Serve the HTML (budget gzip -9 < 10 KB (served as /www/index.html.gz), 19.5 KB raw actual) from LittleFS via `send_file` without RAM issue.
+- Phone on AP: poll every 3 s with AP idle timer (touch on each request, Phase 8).
+- Browser behaviour with `fetch` + `confirm` on iOS Safari / Android Chrome (captive portal not used).
+- Font 16 px prevents zoom on focus (iOS) — check on device.
+- Polish diacritics in served file: `<meta charset="UTF-8">` respected by microdot `send_file` (VERIFY content-type header).
 
 ## Notes
 
-- CDN resources require internet. For fully offline testing (ESP32 with no internet), download Pico.css and HTMX and serve from `src/www/`. Phase 8 deployment checklist includes bundling these.
-- HTMX SSE extension: verify `sse-swap="message"` attribute name in htmx-ext-sse v2.x docs — it may be `hx-ext="sse"` + `sse-connect` on parent element.
-- Config form uses `name="section.field"` which plain HTML doesn't auto-nest. The JS `formToConfig()` function manually builds the nested dict. No HTMX form submit — use `fetch()` for full control.
+- No build, no minify. Size budget is the only size control. If over budget,
+  remove code, not add tooling.
+- Ponytail: no framework, no router, no state library. One `render()` function
+  replaces all DOM nodes it owns.
